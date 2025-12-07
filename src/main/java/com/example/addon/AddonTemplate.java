@@ -15,7 +15,8 @@ import org.slf4j.Logger;
 
 public class AddonTemplate extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
-    public static final Category CATEGORY = new Category("Example");
+    public static final Category CATEGORY = new Category("SMP");
+    public static final Category HYPIXEL_SKYBLOCK = new Category("Hypixel Skyblock");
     public static final HudGroup HUD_GROUP = new HudGroup("Example");
 
     @Override
@@ -26,6 +27,8 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new ModuleExample());
         Modules.get().add(new SpawnerProtect());
         Modules.get().add(new AutoSpawnerSell());
+        Modules.get().add(new HypixelExample());
+        Modules.get().add(new DragonAssistant());
 
         // Commands
         Commands.add(new CommandExample());
@@ -37,6 +40,7 @@ public class AddonTemplate extends MeteorAddon {
     @Override
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
+        Modules.registerCategory(HYPIXEL_SKYBLOCK);
     }
 
     @Override
