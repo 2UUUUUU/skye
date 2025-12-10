@@ -14,11 +14,11 @@
   "environment": "client",
   "entrypoints": {
     "meteor": [
-      "com.example.addon.AddonTemplate"
+      "com.example.addon.Main"
     ]
   },
   "mixins": [
-    "addon-template.mixins.json"
+    "skye.mixins.json"
   ],
   "custom": {
     "meteor-client:color": "225,25,25",

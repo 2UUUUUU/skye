@@ -1,6 +1,6 @@
 package com.example.addon.modules;
 
-import com.example.addon.AddonTemplate;
+import com.example.addon.Main;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
@@ -17,7 +17,7 @@ public class HypixelExample extends Module {
     );
 
     public HypixelExample() {
-        super(AddonTemplate.HYPIXEL_SKYBLOCK, "hypixel-example", "An example module for the Hypixel Skyblock category.");
+        super(Main.HYPIXEL_SKYBLOCK, "hypixel-example", "An example module for the Hypixel Skyblock category.");
     }
 
     @Override

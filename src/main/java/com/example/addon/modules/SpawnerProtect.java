@@ -1,6 +1,6 @@
 package com.example.addon.modules;
 
-import com.example.addon.AddonTemplate;
+import com.example.addon.Main;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -153,7 +153,7 @@ public class SpawnerProtect extends Module {
     private final int PLAYER_COUNT_THRESHOLD = 3;
 
     public SpawnerProtect() {
-        super(AddonTemplate.CATEGORY, "spawner-protect", "Breaks spawners and puts them in your inv when a player is detected");
+        super(Main.CATEGORY, "spawner-protect", "Breaks spawners and puts them in your inv when a player is detected");
     }
 
     @Override

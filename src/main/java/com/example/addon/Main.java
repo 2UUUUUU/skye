@@ -13,15 +13,16 @@ import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import org.slf4j.Logger;
 
-public class AddonTemplate extends MeteorAddon {
+public class Main extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
     public static final Category CATEGORY = new Category("SMP");
     public static final Category HYPIXEL_SKYBLOCK = new Category("Hypixel Skyblock");
+    public static final Category ETHERWARP_TEST = new Category("Etherwarp Test");
     public static final HudGroup HUD_GROUP = new HudGroup("Example");
 
     @Override
     public void onInitialize() {
-        LOG.info("Initializing Meteor Addon Template");
+        LOG.info("Initializing Skye");
 
         // Modules
         Modules.get().add(new ModuleExample());
@@ -29,6 +30,7 @@ public class AddonTemplate extends MeteorAddon {
         Modules.get().add(new AutoSpawnerSell());
         Modules.get().add(new HypixelExample());
         Modules.get().add(new DragonAssistant());
+        Modules.get().add(new EtherwarpTest());
 
         // Commands
         Commands.add(new CommandExample());
@@ -41,6 +43,7 @@ public class AddonTemplate extends MeteorAddon {
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
         Modules.registerCategory(HYPIXEL_SKYBLOCK);
+        Modules.registerCategory(ETHERWARP_TEST);
     }
 
     @Override
