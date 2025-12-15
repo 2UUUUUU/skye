@@ -1,12 +1,14 @@
 package com.example.addon.modules;
 
 import com.example.addon.Main;
+import com.example.addon.utils.player.SmoothAimUtils;
 import com.example.addon.utils.smp.SMPUtils;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.meteorclient.events.world.PlaySoundEvent;
 import net.minecraft.client.MinecraftClient;
@@ -20,7 +22,7 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.World;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -31,6 +33,7 @@ public class AutoSpawnerSell extends Module {
 
     // Setting Groups
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgFailsafes = settings.createGroup("Failsafes");
     private final SettingGroup sgSendProfits = settings.createGroup("Send Profits");
     private final SettingGroup sgSpawnerProtect = settings.createGroup("Spawner Protect");
 
@@ -79,6 +82,45 @@ public class AutoSpawnerSell extends Module {
         .description("Maximum delay. Maximum: 432000 ticks (6 hours)")
         .defaultValue(400).min(20).max(432000)
         .visible(pauseSequence::get).build());
+
+    private final Setting<Boolean> smoothAim = sgGeneral.add(new BoolSetting.Builder()
+        .name("smooth-aim")
+        .description("Enable smooth aiming for spawner interactions")
+        .defaultValue(false).build());
+
+    private final Setting<Integer> rotationSpeed = sgGeneral.add(new IntSetting.Builder()
+        .name("rotation-speed")
+        .description("Rotation speed in ticks for smooth aim")
+        .defaultValue(10).min(0).max(600).sliderMax(600)
+        .visible(smoothAim::get).build());
+
+    // Failsafes Settings
+    private final Setting<TeleportAction> onTeleport = sgFailsafes.add(new EnumSetting.Builder<TeleportAction>()
+        .name("on-teleport")
+        .description("What to do when a teleport is detected")
+        .defaultValue(TeleportAction.PauseUntilReturn).build());
+
+    private final Setting<Integer> teleportDistance = sgFailsafes.add(new IntSetting.Builder()
+        .name("distance")
+        .description("Distance in blocks to detect as teleport")
+        .defaultValue(100).min(10).max(1000).sliderMax(500).build());
+
+    private final Setting<Integer> teleportTimeWindow = sgFailsafes.add(new IntSetting.Builder()
+        .name("time-window")
+        .description("Time window in ticks to detect teleport")
+        .defaultValue(20).min(1).max(100).sliderMax(100).build());
+
+    private final Setting<String> homePosition = sgFailsafes.add(new StringSetting.Builder()
+        .name("home-position")
+        .description("Home position in format: X Y Z (e.g., 100 64 200)")
+        .defaultValue("")
+        .visible(() -> onTeleport.get() == TeleportAction.PauseUntilReturn).build());
+
+    private final Setting<Integer> pauseTime = sgFailsafes.add(new IntSetting.Builder()
+        .name("pause-time")
+        .description("Time in ticks to pause when teleport detected")
+        .defaultValue(200).min(1).max(72000).sliderMax(1200)
+        .visible(() -> onTeleport.get() == TeleportAction.PauseFor).build());
 
     // Send Profits Settings
     private final Setting<Boolean> enableSendProfits = sgSendProfits.add(new BoolSetting.Builder()
@@ -130,10 +172,6 @@ public class AutoSpawnerSell extends Module {
         .name("recheck-delay-seconds").description("Delay before rechecking")
         .defaultValue(1).min(1).sliderMax(10).visible(enableSpawnerProtect::get).build());
 
-    private final Setting<Integer> emergencyDistance = sgSpawnerProtect.add(new IntSetting.Builder()
-        .name("emergency-distance").description("Distance for immediate disconnect")
-        .defaultValue(7).min(1).max(20).sliderMax(20).visible(enableSpawnerProtect::get).build());
-
     private final Setting<Boolean> enableWhitelist = sgSpawnerProtect.add(new BoolSetting.Builder()
         .name("enable-whitelist").description("Enable player whitelist")
         .defaultValue(false).visible(enableSpawnerProtect::get).build());
@@ -171,7 +209,20 @@ public class AutoSpawnerSell extends Module {
         PROTECT_OPEN_PLAYER_INVENTORY, PROTECT_CHECK_INVENTORY, PROTECT_FIND_CHEST,
         PROTECT_OPEN_CHEST, PROTECT_DEPOSIT_BONES_TO_CHEST, PROTECT_CLOSE_CHEST,
         PROTECT_RECHECK_WAIT, PROTECT_GOING_TO_SPAWNERS, PROTECT_GOING_TO_CHEST,
-        PROTECT_OPENING_CHEST, PROTECT_DEPOSITING_ITEMS, PROTECT_DISCONNECTING
+        PROTECT_OPENING_CHEST, PROTECT_DEPOSITING_ITEMS, PROTECT_DISCONNECTING,
+        TELEPORT_PAUSED, TELEPORT_PAUSE_FOR_TIME
+    }
+
+    // Teleport Action Enum
+    public enum TeleportAction {
+        DisableModule("Disable Module"),
+        Disconnect("Disconnect"),
+        PauseUntilReturn("Pause Until Return"),
+        PauseFor("Pause For");
+
+        private final String name;
+        TeleportAction(String name) { this.name = name; }
+        @Override public String toString() { return name; }
     }
 
     // State variables
@@ -198,14 +249,18 @@ public class AutoSpawnerSell extends Module {
     private final int PAUSE_DURATION = 20;
     private BlockPos targetChest = null;
     private int chestOpenAttempts = 0;
-    private boolean emergencyDisconnect = false;
     private String emergencyReason = "";
-    private World trackedWorld = null;
-    private int worldChangeCount = 0;
     private int transferDelayCounter = 0;
     private int lastProcessedSlot = -1;
     private BlockPos tempBoneChest = null;
     private int boneChestOpenAttempts = 0;
+
+    // Teleport detection variables
+    private Vec3d lastPosition = null;
+    private Vec3d positionBeforeTeleport = null;
+    private State stateBeforeTeleport = State.IDLE;
+    private int teleportWaitCounter = 0;
+    private boolean teleportDetected = false;
 
     public AutoSpawnerSell() {
         super(Main.CATEGORY, "auto-spawner-sell", "Automatically drops bones from spawner and sells them");
@@ -217,9 +272,9 @@ public class AutoSpawnerSell extends Module {
         resetCounters();
         resetProtectState();
 
-        if (mc.world != null) {
-            trackedWorld = mc.world;
-            worldChangeCount = 0;
+        if (mc.player != null) {
+            lastPosition = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+            positionBeforeTeleport = null;
         }
 
         info("AutoSpawnerSell activated - searching for spawner...");
@@ -237,6 +292,7 @@ public class AutoSpawnerSell extends Module {
         resetCounters();
         resetProtectState();
         cleanupControls();
+        SmoothAimUtils.cancelRotation();
         info("AutoSpawnerSell deactivated");
     }
 
@@ -279,13 +335,26 @@ public class AutoSpawnerSell extends Module {
 
         protectTickCounter++;
 
-        if (enableSpawnerProtect.get() && mc.world != trackedWorld) {
-            handleWorldChange();
-            return;
+        // Handle smooth aim rotation if active
+        if (smoothAim.get() && SmoothAimUtils.isRotating()) {
+            SmoothAimUtils.tickRotation();
         }
 
-        if (enableSpawnerProtect.get() && checkEmergencyDisconnect()) return;
-        if (enableSpawnerProtect.get() && !isProtectMode() && checkForEntities()) return;
+        // PRIORITY 1: Handle teleport states first (if already in teleport mode, ONLY handle teleport - skip everything else)
+        if (currentState == State.TELEPORT_PAUSED || currentState == State.TELEPORT_PAUSE_FOR_TIME) {
+            handleTeleportStates();
+            return; // Stop ALL processing - no entity checks, no sound checks, nothing
+        }
+
+        // PRIORITY 2: Check for teleport detection (only if NOT already in a teleport state)
+        if (checkTeleportDetection()) {
+            return; // Stop all other processing if teleport is detected - entity check will be skipped next tick
+        }
+
+        // PRIORITY 3: Spawner Protect checks (only run if not in teleport mode)
+        if (enableSpawnerProtect.get() && !isTeleportMode() && checkForEntities()) {
+            return;
+        }
 
         if (transferDelayCounter > 0) {
             transferDelayCounter--;
@@ -304,7 +373,9 @@ public class AutoSpawnerSell extends Module {
     @EventHandler
     private void onPlaySound(PlaySoundEvent event) {
         if (!enableSpawnerProtect.get() || mc.player == null || mc.world == null) return;
-        if (isProtectMode()) return;
+
+        // CRITICAL: Skip ALL sound detection if in any teleport or protect mode
+        if (isTeleportMode() || isProtectMode()) return;
 
         String soundId = event.sound.getId().toString();
 
@@ -333,6 +404,169 @@ public class AutoSpawnerSell extends Module {
         }
     }
 
+    private boolean checkTeleportDetection() {
+        if (mc.player == null) return false;
+
+        // Initialize last position if null
+        if (lastPosition == null) {
+            lastPosition = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+            return false;
+        }
+
+        Vec3d currentPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        double distance = currentPos.distanceTo(lastPosition);
+
+        // Check if distance threshold is met
+        if (distance >= teleportDistance.get()) {
+            // Teleport detected!
+            warning("Teleport detected! Distance: " + String.format("%.0f", distance) + " blocks");
+
+            // CRITICAL: Set state IMMEDIATELY before handleTeleportDetected
+            // This ensures isTeleportMode() returns true on the SAME tick
+            State previousState = currentState;
+            handleTeleportDetected();
+
+            // Update last position to current to prevent re-detection
+            lastPosition = currentPos;
+
+            info("Current state after teleport: " + currentState);
+            info("Is in teleport mode: " + isTeleportMode());
+
+            return true;
+        }
+
+        // Update last position for next tick
+        lastPosition = currentPos;
+        return false;
+    }
+
+    private void handleTeleportDetected() {
+        teleportDetected = true;
+        positionBeforeTeleport = lastPosition;
+
+        switch (onTeleport.get()) {
+            case DisableModule:
+                info("Teleport detected - Disabling module");
+                toggle();
+                break;
+
+            case Disconnect:
+                info("Teleport detected - Disconnecting");
+                if (mc.world != null) {
+                    mc.world.disconnect(Text.literal("Disconnected: Teleport Detected"));
+                }
+                toggle();
+                break;
+
+            case PauseUntilReturn:
+                // Parse home position from settings
+                Vec3d homePos = parseHomePosition();
+                if (homePos == null) {
+                    error("Invalid home position format! Expected format: X Y Z (e.g., 100 64 200)");
+                    error("Please set a valid home position in the settings.");
+                    toggle();
+                    return;
+                }
+
+                info("Teleport detected - Pausing until return to home position");
+                info("Home position: " + String.format("X:%.1f Y:%.1f Z:%.1f",
+                    homePos.x, homePos.y, homePos.z));
+                if (currentState != State.TELEPORT_PAUSED) {
+                    stateBeforeTeleport = currentState;
+                    currentState = State.TELEPORT_PAUSED;
+                    cleanupControls();
+                    SmoothAimUtils.cancelRotation();
+                }
+                break;
+
+            case PauseFor:
+                int pauseDuration = pauseTime.get();
+                info("Teleport detected - Pausing for " + pauseDuration + " ticks (" +
+                    String.format("%.1f", pauseDuration / 20.0) + " seconds)");
+                if (currentState != State.TELEPORT_PAUSE_FOR_TIME) {
+                    stateBeforeTeleport = currentState;
+                    currentState = State.TELEPORT_PAUSE_FOR_TIME;
+                    teleportWaitCounter = pauseDuration;
+                    cleanupControls();
+                    SmoothAimUtils.cancelRotation();
+                }
+                break;
+        }
+    }
+
+    private void handleTeleportStates() {
+        if (currentState == State.TELEPORT_PAUSE_FOR_TIME) {
+            // Simple timer-based pause
+            if (teleportWaitCounter > 0) {
+                teleportWaitCounter--;
+                if (teleportWaitCounter % 100 == 0 && teleportWaitCounter > 0) {
+                    info("Resuming in " + teleportWaitCounter + " ticks (" +
+                        String.format("%.1f", teleportWaitCounter / 20.0) + " seconds)");
+                }
+            } else {
+                info("Pause duration complete - resuming from previous state");
+                currentState = stateBeforeTeleport;
+                stateBeforeTeleport = State.IDLE;
+                positionBeforeTeleport = null;
+                teleportDetected = false;
+            }
+            return;
+        }
+
+        if (mc.player == null) return;
+
+        if (currentState == State.TELEPORT_PAUSED) {
+            // Parse home position from settings
+            Vec3d homePos = parseHomePosition();
+            if (homePos == null) {
+                error("Invalid home position! Disabling module.");
+                toggle();
+                return;
+            }
+
+            Vec3d currentPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+            double distanceFromHome = currentPos.distanceTo(homePos);
+
+            // Check if we're back within the teleport distance threshold of HOME
+            if (distanceFromHome < teleportDistance.get()) {
+                info("Return detected - Back at home position (distance: " + String.format("%.1f", distanceFromHome) + " blocks)");
+                info("Resuming sequence...");
+                currentState = stateBeforeTeleport;
+                stateBeforeTeleport = State.IDLE;
+                positionBeforeTeleport = null;
+                teleportDetected = false;
+                lastPosition = currentPos;
+            }
+        }
+    }
+
+    /**
+     * Parse home position from string setting
+     * Expected format: "X Y Z" (e.g., "100 64 200")
+     * @return Vec3d of home position, or null if invalid format
+     */
+    private Vec3d parseHomePosition() {
+        String posStr = homePosition.get().trim();
+        if (posStr.isEmpty()) {
+            return null;
+        }
+
+        try {
+            String[] parts = posStr.split("\\s+");
+            if (parts.length != 3) {
+                return null;
+            }
+
+            double x = Double.parseDouble(parts[0]);
+            double y = Double.parseDouble(parts[1]);
+            double z = Double.parseDouble(parts[2]);
+
+            return new Vec3d(x, y, z);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     private void resetCounters() {
         delayCounter = 0;
         timeoutCounter = 0;
@@ -355,779 +589,791 @@ public class AutoSpawnerSell extends Module {
         miningCycleTimer = 0;
         targetChest = null;
         chestOpenAttempts = 0;
-        emergencyDisconnect = false;
         emergencyReason = "";
         transferDelayCounter = 0;
         lastProcessedSlot = -1;
         tempBoneChest = null;
         boneChestOpenAttempts = 0;
+        teleportWaitCounter = 0;
+        stateBeforeTeleport = State.IDLE;
+        teleportDetected = false;
+        positionBeforeTeleport = null;
     }
 
-    private void cleanupControls() {
-        SMPUtils.stopBreaking();
-        SMPUtils.setSneaking(false, sneakingState);
-        SMPUtils.stopMoving();
-        SMPUtils.setJumping(false);
-    }
 
-    private void handleWorldChange() {
-        worldChangeCount++;
-        trackedWorld = mc.world;
-        info("World changed - count: " + worldChangeCount);
-    }
+private void cleanupControls() {
+    SMPUtils.stopBreaking();
+    SMPUtils.setSneaking(false, sneakingState);
+    SMPUtils.stopMoving();
+    SMPUtils.setJumping(false);
+}
 
-    private boolean isProtectMode() {
-        return currentState.name().startsWith("PROTECT_") || currentState == State.OPENED_CHEST_CHECK;
-    }
+private boolean isTeleportMode() {
+    return currentState == State.TELEPORT_PAUSED ||
+        currentState == State.TELEPORT_PAUSE_FOR_TIME;
+}
 
-    private boolean checkEmergencyDisconnect() {
-        if (targetEntities.get().isEmpty()) return false;
+private boolean isProtectMode() {
+    return currentState.name().startsWith("PROTECT_") || currentState == State.OPENED_CHEST_CHECK;
+}
 
-        List<Entity> nearbyEntities = mc.world.getOtherEntities(mc.player,
-            new Box(mc.player.getBlockPos()).expand(emergencyDistance.get()));
-
-        for (Entity entity : nearbyEntities) {
-            if (entity == mc.player || !targetEntities.get().contains(entity.getType())) continue;
-
-            if (entity instanceof PlayerEntity playerEntity) {
-                String playerName = SMPUtils.getPlayerName(playerEntity);
-                if (enableWhitelist.get() && SMPUtils.isPlayerWhitelisted(playerName, whitelistPlayers.get())) {
-                    continue;
-                }
-            }
-
-            double distance = mc.player.distanceTo(entity);
-            if (distance <= emergencyDistance.get()) {
-                String entityName = SMPUtils.getEntityName(entity);
-                warning("EMERGENCY: " + entityName + " came too close (" + String.format("%.1f", distance) + " blocks)!");
-
-                emergencyDisconnect = true;
-                emergencyReason = entityName + " came too close";
-                detectedEntity = entityName;
-                detectionTime = System.currentTimeMillis();
-
-                SMPUtils.disableAutoReconnectIfEnabled(this);
-                mc.player.closeHandledScreen();
-                currentState = State.PROTECT_DISCONNECTING;
-                return true;
-            }
+private boolean checkForEntities() {
+    if (isTeleportMode()) {
+        if (protectTickCounter % 20 == 0) { // Log every second
+            info("Skipping entity check - in teleport mode (state: " + currentState + ")");
         }
         return false;
     }
 
-    private boolean checkForEntities() {
-        if (targetEntities.get().isEmpty()) return false;
+    if (isProtectMode()) return false;
 
-        List<Entity> nearbyEntities = mc.world.getOtherEntities(mc.player,
-            new Box(mc.player.getBlockPos()).expand(entitiesRange.get()));
+    if (targetEntities.get().isEmpty()) return false;
 
-        for (Entity entity : nearbyEntities) {
-            if (entity == mc.player || !targetEntities.get().contains(entity.getType())) continue;
+    List<Entity> nearbyEntities = mc.world.getOtherEntities(mc.player,
+        new net.minecraft.util.math.Box(mc.player.getBlockPos()).expand(entitiesRange.get()));
 
-            if (entity instanceof PlayerEntity playerEntity) {
-                String playerName = SMPUtils.getPlayerName(playerEntity);
-                if (enableWhitelist.get() && SMPUtils.isPlayerWhitelisted(playerName, whitelistPlayers.get())) {
-                    continue;
-                }
+    for (Entity entity : nearbyEntities) {
+        if (entity == mc.player || !targetEntities.get().contains(entity.getType())) continue;
+
+        if (entity instanceof PlayerEntity playerEntity) {
+            String playerName = SMPUtils.getPlayerName(playerEntity);
+            if (enableWhitelist.get() && SMPUtils.isPlayerWhitelisted(playerName, whitelistPlayers.get())) {
+                continue;
             }
-
-            detectedEntity = SMPUtils.getEntityName(entity);
-            detectionTime = System.currentTimeMillis();
-
-            warning("SpawnerProtect: Entity detected - " + detectedEntity);
-            SMPUtils.disableAutoReconnectIfEnabled(this);
-
-            mc.player.closeHandledScreen();
-            currentState = State.PROTECT_DETECTION_WAIT;
-            delayCounter = 20;
-            info("Entity detected! Starting protection sequence...");
-
-            return true;
         }
-        return false;
+
+        detectedEntity = SMPUtils.getEntityName(entity);
+        detectionTime = System.currentTimeMillis();
+
+        warning("SpawnerProtect: Entity detected - " + detectedEntity);
+        info("Current state when entity detected: " + currentState);
+        info("Is in teleport mode: " + isTeleportMode());
+        SMPUtils.disableAutoReconnectIfEnabled(this);
+
+        mc.player.closeHandledScreen();
+        currentState = State.PROTECT_DETECTION_WAIT;
+        delayCounter = 20;
+        info("Entity detected! Starting protection sequence...");
+
+        return true;
+    }
+    return false;
+}
+
+private void sendWebhookNotification() {
+    if (!webhook.get()) return;
+
+    String messageContent = "";
+    if (selfPing.get() && discordId.get() != null && !discordId.get().trim().isEmpty()) {
+        messageContent = String.format("<@%s>", discordId.get().trim());
     }
 
-    private void sendWebhookNotification() {
-        if (!webhook.get()) return;
+    SMPUtils.sendWebhookNotification(
+        webhookUrl.get(),
+        messageContent,
+        detectedEntity,
+        detectionTime,
+        false, // No emergency disconnect
+        emergencyReason,
+        spawnersMinedSuccessfully,
+        itemsDepositedSuccessfully,
+        this
+    );
+}
 
-        String messageContent = "";
-        if (selfPing.get() && discordId.get() != null && !discordId.get().trim().isEmpty()) {
-            messageContent = String.format("<@%s>", discordId.get().trim());
-        }
+private void handleState(ScreenHandler handler) {
+    switch (currentState) {
+        case IDLE -> currentState = State.FINDING_SPAWNER;
+        case FINDING_SPAWNER -> handleFindingSpawner();
+        case OPENING_SPAWNER -> handleOpeningSpawner();
+        case WAITING_SPAWNER_MENU -> handleWaitingSpawnerMenu(handler);
+        case CHECKING_SPAWNER_CONTENTS -> handleCheckingSpawnerContents(handler);
+        case PAUSED_NOT_ENOUGH_BONES -> handlePausedNotEnoughBones();
+        case CLICK_SLOT_50 -> handleClickSlot50(handler);
+        case SENDING_ORDER_COMMAND -> handleSendingOrderCommand();
+        case WAITING_ORDER_MENU -> handleWaitingOrderMenu(handler);
+        case CLICK_BONE_SLOT -> handleClickBoneSlot(handler);
+        case WAITING_DEPOSIT_MENU -> handleWaitingDepositMenu(handler);
+        case DEPOSITING_BONES -> handleDepositingBones(handler);
+        case CLOSING_DEPOSIT_MENU -> handleClosingDepositMenu();
+        case WAITING_CONFIRM_MENU -> handleWaitingConfirmMenu(handler);
+        case CLICK_CONFIRM_SLOT -> handleClickConfirmSlot(handler);
+        case WAITING_FOR_CHAT_CONFIRMATION -> handleWaitingForChatConfirmation();
+        case CLOSING_FIRST_INVENTORY -> handleClosingFirstInventory();
+        case CLOSING_SECOND_INVENTORY -> handleClosingSecondInventory();
+        case LOOP_DELAY -> handleLoopDelay();
+        case RETRY_SEQUENCE -> handleRetrySequence();
+        case PROTECT_DETECTION_WAIT -> handleProtectDetectionWait();
+        case PROTECT_CHECK_LIME_GLASS -> handleProtectCheckLimeGlass(handler);
+        case PROTECT_WAIT_AFTER_LIME_GLASS -> handleProtectWaitAfterLimeGlass();
+        case PROTECT_CLOSE_ALL_INVENTORIES -> handleProtectCloseAllInventories();
+        case OPENED_CHEST_CHECK -> handleOpenedChestCheck(handler);
+        case PROTECT_INITIAL_WAIT -> handleProtectInitialWait();
+        case PROTECT_OPEN_PLAYER_INVENTORY -> handleProtectOpenPlayerInventory();
+        case PROTECT_CHECK_INVENTORY -> handleProtectCheckInventory();
+        case PROTECT_FIND_CHEST -> handleProtectFindChest();
+        case PROTECT_OPEN_CHEST -> handleProtectOpenChest();
+        case PROTECT_DEPOSIT_BONES_TO_CHEST -> handleProtectDepositBonesToChest(handler);
+        case PROTECT_CLOSE_CHEST -> handleProtectCloseChest();
+        case PROTECT_RECHECK_WAIT -> handleProtectRecheckWait();
+        case PROTECT_GOING_TO_SPAWNERS -> handleProtectGoingToSpawners();
+        case PROTECT_GOING_TO_CHEST -> handleProtectGoingToChest();
+        case PROTECT_OPENING_CHEST -> handleProtectOpeningChest();
+        case PROTECT_DEPOSITING_ITEMS -> handleProtectDepositingItems();
+        case PROTECT_DISCONNECTING -> handleProtectDisconnecting();
+    }
+}
 
-        SMPUtils.sendWebhookNotification(
-            webhookUrl.get(),
-            messageContent,
-            detectedEntity,
-            detectionTime,
-            emergencyDisconnect,
-            emergencyReason,
-            spawnersMinedSuccessfully,
-            itemsDepositedSuccessfully,
-            this
-        );
+private void handleFindingSpawner() {
+    BlockPos spawner = SMPUtils.findNearestSpawner(spawnerRange.get());
+
+    if (spawner != null) {
+        targetSpawner = spawner;
+        info("Found spawner at " + targetSpawner);
+        currentState = State.OPENING_SPAWNER;
+        delayCounter = actionDelay.get();
+        spawnerTimeoutCounter = 0;
+    } else {
+        warning("No spawner found in range!");
+        delayCounter = 40;
+    }
+}
+
+private void handleOpeningSpawner() {
+    if (targetSpawner == null) {
+        currentState = State.FINDING_SPAWNER;
+        return;
     }
 
-    private void handleState(ScreenHandler handler) {
-        switch (currentState) {
-            case IDLE -> currentState = State.FINDING_SPAWNER;
-            case FINDING_SPAWNER -> handleFindingSpawner();
-            case OPENING_SPAWNER -> handleOpeningSpawner();
-            case WAITING_SPAWNER_MENU -> handleWaitingSpawnerMenu(handler);
-            case CHECKING_SPAWNER_CONTENTS -> handleCheckingSpawnerContents(handler);
-            case PAUSED_NOT_ENOUGH_BONES -> handlePausedNotEnoughBones();
-            case CLICK_SLOT_50 -> handleClickSlot50(handler);
-            case SENDING_ORDER_COMMAND -> handleSendingOrderCommand();
-            case WAITING_ORDER_MENU -> handleWaitingOrderMenu(handler);
-            case CLICK_BONE_SLOT -> handleClickBoneSlot(handler);
-            case WAITING_DEPOSIT_MENU -> handleWaitingDepositMenu(handler);
-            case DEPOSITING_BONES -> handleDepositingBones(handler);
-            case CLOSING_DEPOSIT_MENU -> handleClosingDepositMenu();
-            case WAITING_CONFIRM_MENU -> handleWaitingConfirmMenu(handler);
-            case CLICK_CONFIRM_SLOT -> handleClickConfirmSlot(handler);
-            case WAITING_FOR_CHAT_CONFIRMATION -> handleWaitingForChatConfirmation();
-            case CLOSING_FIRST_INVENTORY -> handleClosingFirstInventory();
-            case CLOSING_SECOND_INVENTORY -> handleClosingSecondInventory();
-            case LOOP_DELAY -> handleLoopDelay();
-            case RETRY_SEQUENCE -> handleRetrySequence();
-            case PROTECT_DETECTION_WAIT -> handleProtectDetectionWait();
-            case PROTECT_CHECK_LIME_GLASS -> handleProtectCheckLimeGlass(handler);
-            case PROTECT_WAIT_AFTER_LIME_GLASS -> handleProtectWaitAfterLimeGlass();
-            case PROTECT_CLOSE_ALL_INVENTORIES -> handleProtectCloseAllInventories();
-            case OPENED_CHEST_CHECK -> handleOpenedChestCheck(handler);
-            case PROTECT_INITIAL_WAIT -> handleProtectInitialWait();
-            case PROTECT_OPEN_PLAYER_INVENTORY -> handleProtectOpenPlayerInventory();
-            case PROTECT_CHECK_INVENTORY -> handleProtectCheckInventory();
-            case PROTECT_FIND_CHEST -> handleProtectFindChest();
-            case PROTECT_OPEN_CHEST -> handleProtectOpenChest();
-            case PROTECT_DEPOSIT_BONES_TO_CHEST -> handleProtectDepositBonesToChest(handler);
-            case PROTECT_CLOSE_CHEST -> handleProtectCloseChest();
-            case PROTECT_RECHECK_WAIT -> handleProtectRecheckWait();
-            case PROTECT_GOING_TO_SPAWNERS -> handleProtectGoingToSpawners();
-            case PROTECT_GOING_TO_CHEST -> handleProtectGoingToChest();
-            case PROTECT_OPENING_CHEST -> handleProtectOpeningChest();
-            case PROTECT_DEPOSITING_ITEMS -> handleProtectDepositingItems();
-            case PROTECT_DISCONNECTING -> handleProtectDisconnecting();
-        }
-    }
-
-// ADD THESE METHODS INSIDE THE AutoSpawnerSell CLASS (after handleState method)
-
-    private void handleFindingSpawner() {
-        BlockPos spawner = SMPUtils.findNearestSpawner(spawnerRange.get());
-
-        if (spawner != null) {
-            targetSpawner = spawner;
-            info("Found spawner at " + targetSpawner);
-            currentState = State.OPENING_SPAWNER;
-            delayCounter = actionDelay.get();
-            spawnerTimeoutCounter = 0;
-        } else {
-            warning("No spawner found in range!");
-            delayCounter = 40;
-        }
-    }
-
-    private void handleOpeningSpawner() {
-        if (targetSpawner == null) {
-            currentState = State.FINDING_SPAWNER;
-            return;
-        }
-
+    if (smoothAim.get() && !SmoothAimUtils.isRotating()) {
+        SmoothAimUtils.startSmoothRotation(targetSpawner, rotationSpeed.get(), () -> {
+            info("Right-clicking spawner at " + targetSpawner);
+            SMPUtils.interactWithBlock(targetSpawner);
+        });
+    } else if (!smoothAim.get()) {
         SMPUtils.lookAtBlock(targetSpawner);
         info("Right-clicking spawner at " + targetSpawner);
         SMPUtils.interactWithBlock(targetSpawner);
+    } else {
+        return;
+    }
 
-        currentState = State.WAITING_SPAWNER_MENU;
-        delayCounter = actionDelay.get() * 2;
+    currentState = State.WAITING_SPAWNER_MENU;
+    delayCounter = actionDelay.get() * 2;
+    spawnerTimeoutCounter = 0;
+}
+
+private void handleWaitingSpawnerMenu(ScreenHandler handler) {
+    spawnerTimeoutCounter++;
+
+    if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
+        info("Spawner menu opened (6 rows)");
+        currentState = State.CHECKING_SPAWNER_CONTENTS;
+        delayCounter = actionDelay.get();
+        spawnerTimeoutCounter = 0;
+        return;
+    }
+
+    if (spawnerTimeoutCounter >= spawnerTimeout.get()) {
+        warning("Spawner menu timeout - retrying to open spawner...");
+        currentState = State.OPENING_SPAWNER;
+        delayCounter = actionDelay.get();
         spawnerTimeoutCounter = 0;
     }
+}
 
-    private void handleWaitingSpawnerMenu(ScreenHandler handler) {
-        spawnerTimeoutCounter++;
+private void handleCheckingSpawnerContents(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler container)) {
+        currentState = State.RETRY_SEQUENCE;
+        return;
+    }
 
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
-            info("Spawner menu opened (6 rows)");
-            currentState = State.CHECKING_SPAWNER_CONTENTS;
-            delayCounter = actionDelay.get();
-            spawnerTimeoutCounter = 0;
+    int firstFiveRows = 5 * 9;
+    for (int i = 0; i < firstFiveRows; i++) {
+        ItemStack stack = container.getSlot(i).getStack();
+        if (stack.isEmpty() || stack.getItem() != Items.BONE) {
+            warning("Not enough bones in spawner! Pausing sequence...");
+            mc.player.closeHandledScreen();
+            currentState = State.PAUSED_NOT_ENOUGH_BONES;
+
+            if (pauseSequence.get()) {
+                int minDelay = pauseMinimumDelay.get();
+                int maxDelay = pauseMaximumDelay.get();
+                int randomDelay = minDelay + (int)(Math.random() * (maxDelay - minDelay + 1));
+                delayCounter = randomDelay;
+                info("Pausing for " + randomDelay + " ticks (between " + minDelay + " and " + maxDelay + ")");
+            } else {
+                delayCounter = 200;
+            }
             return;
-        }
-
-        if (spawnerTimeoutCounter >= spawnerTimeout.get()) {
-            warning("Spawner menu timeout - retrying to open spawner...");
-            currentState = State.OPENING_SPAWNER;
-            delayCounter = actionDelay.get();
-            spawnerTimeoutCounter = 0;
         }
     }
 
-    private void handleCheckingSpawnerContents(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler container)) {
-            currentState = State.RETRY_SEQUENCE;
-            return;
-        }
+    info("Spawner contents verified - all first 5 rows contain bones");
+    currentState = State.CLICK_SLOT_50;
+    delayCounter = actionDelay.get();
+}
 
-        int firstFiveRows = 5 * 9;
-        for (int i = 0; i < firstFiveRows; i++) {
-            ItemStack stack = container.getSlot(i).getStack();
-            if (stack.isEmpty() || stack.getItem() != Items.BONE) {
-                warning("Not enough bones in spawner! Pausing sequence...");
-                mc.player.closeHandledScreen();
-                currentState = State.PAUSED_NOT_ENOUGH_BONES;
+private void handlePausedNotEnoughBones() {
+    info("Pause complete, restarting sequence from spawner");
+    currentState = State.FINDING_SPAWNER;
+    delayCounter = actionDelay.get() * 2;
+}
 
-                if (pauseSequence.get()) {
-                    int minDelay = pauseMinimumDelay.get();
-                    int maxDelay = pauseMaximumDelay.get();
-                    int randomDelay = minDelay + (int)(Math.random() * (maxDelay - minDelay + 1));
-                    delayCounter = randomDelay;
-                    info("Pausing for " + randomDelay + " ticks (between " + minDelay + " and " + maxDelay + ")");
-                } else {
-                    delayCounter = 200; // Default delay if pause sequence is disabled
-                }
-                return;
-            }
-        }
+private void handleClickSlot50(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler)) {
+        currentState = State.RETRY_SEQUENCE;
+        return;
+    }
 
-        info("Spawner contents verified - all first 5 rows contain bones");
-        currentState = State.CLICK_SLOT_50;
+    info("Clicking slot 50 in spawner menu");
+    mc.interactionManager.clickSlot(handler.syncId, 50, 0, SlotActionType.PICKUP, mc.player);
+    currentState = State.SENDING_ORDER_COMMAND;
+    delayCounter = actionDelay.get();
+}
+
+private void handleSendingOrderCommand() {
+    info("Sending /order bones command");
+    mc.getNetworkHandler().sendChatCommand("order bones");
+    currentState = State.WAITING_ORDER_MENU;
+    delayCounter = actionDelay.get() * 2;
+}
+
+private void handleWaitingOrderMenu(ScreenHandler handler) {
+    if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
+        info("Order menu detected (6 rows)");
+        currentState = State.CLICK_BONE_SLOT;
         delayCounter = actionDelay.get();
     }
+}
 
-    private void handlePausedNotEnoughBones() {
-        info("Pause complete, restarting sequence from spawner");
-        currentState = State.FINDING_SPAWNER;
-        delayCounter = actionDelay.get() * 2;
+private void handleClickBoneSlot(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler container)) {
+        currentState = State.RETRY_SEQUENCE;
+        return;
     }
 
-    private void handleClickSlot50(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler)) {
-            currentState = State.RETRY_SEQUENCE;
-            return;
-        }
+    int[] prioritySlots = {4, 5, 6, 7, 8, 9, 10, 11, 12};
+    int slotToClick = -1;
 
-        info("Clicking slot 50 in spawner menu");
-        mc.interactionManager.clickSlot(handler.syncId, 50, 0, SlotActionType.PICKUP, mc.player);
-        currentState = State.SENDING_ORDER_COMMAND;
-        delayCounter = actionDelay.get();
-    }
-
-    private void handleSendingOrderCommand() {
-        info("Sending /order bones command");
-        mc.getNetworkHandler().sendChatCommand("order bones");
-        currentState = State.WAITING_ORDER_MENU;
-        delayCounter = actionDelay.get() * 2;
-    }
-
-    private void handleWaitingOrderMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
-            info("Order menu detected (6 rows)");
-            currentState = State.CLICK_BONE_SLOT;
-            delayCounter = actionDelay.get();
-        }
-    }
-
-    private void handleClickBoneSlot(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler container)) {
-            currentState = State.RETRY_SEQUENCE;
-            return;
-        }
-
-        int[] prioritySlots = {4, 5, 6, 7, 8, 9, 10, 11, 12};
-        int slotToClick = -1;
-
-        for (int slot : prioritySlots) {
-            if (slot < container.getRows() * 9) {
-                ItemStack stack = container.getSlot(slot).getStack();
-                if (!stack.isEmpty()) {
-                    slotToClick = slot;
-                    break;
-                }
-            }
-        }
-
-        if (slotToClick == -1) {
-            for (int i = 0; i < Math.min(5 * 9, container.getRows() * 9); i++) {
-                ItemStack stack = container.getSlot(i).getStack();
-                if (!stack.isEmpty()) {
-                    slotToClick = i;
-                    break;
-                }
-            }
-        }
-
-        if (slotToClick != -1) {
-            info("Clicking slot " + slotToClick + " in order menu");
-            mc.interactionManager.clickSlot(handler.syncId, slotToClick, 0, SlotActionType.PICKUP, mc.player);
-            currentState = State.WAITING_DEPOSIT_MENU;
-            delayCounter = actionDelay.get() * 2;
-        } else {
-            warning("No items found in order menu");
-            currentState = State.RETRY_SEQUENCE;
-        }
-    }
-
-    private void handleWaitingDepositMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 4) {
-            info("Deposit menu detected (4 rows)");
-            currentState = State.DEPOSITING_BONES;
-            delayCounter = actionDelay.get();
-        }
-    }
-
-    private void handleDepositingBones(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler container)) {
-            currentState = State.RETRY_SEQUENCE;
-            return;
-        }
-
-        int containerSlots = container.getRows() * 9;
-        boolean chestFull = true;
-
-        for (int i = 0; i < containerSlots; i++) {
-            ItemStack stack = container.getSlot(i).getStack();
-            if (stack.isEmpty() || (stack.getItem() == Items.BONE && stack.getCount() < stack.getMaxCount())) {
-                chestFull = false;
+    for (int slot : prioritySlots) {
+        if (slot < container.getRows() * 9) {
+            ItemStack stack = container.getSlot(slot).getStack();
+            if (!stack.isEmpty()) {
+                slotToClick = slot;
                 break;
             }
         }
+    }
 
-        boolean foundBones = false;
-        for (int i = containerSlots; i < container.slots.size(); i++) {
+    if (slotToClick == -1) {
+        for (int i = 0; i < Math.min(5 * 9, container.getRows() * 9); i++) {
             ItemStack stack = container.getSlot(i).getStack();
-            if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
-                foundBones = true;
-                if (!chestFull) {
-                    info("Moving bones from slot " + i);
-                    mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                    delayCounter = actionDelay.get();
-                    return;
-                }
+            if (!stack.isEmpty()) {
+                slotToClick = i;
+                break;
             }
         }
-
-        if (!foundBones || chestFull) {
-            info(chestFull ? "Chest is full, proceeding" : "All bones deposited");
-            currentState = State.CLOSING_DEPOSIT_MENU;
-            delayCounter = actionDelay.get();
-        }
     }
 
-    private void handleClosingDepositMenu() {
-        info("Closing deposit menu");
-        mc.player.closeHandledScreen();
-        currentState = State.WAITING_CONFIRM_MENU;
+    if (slotToClick != -1) {
+        info("Clicking slot " + slotToClick + " in order menu");
+        mc.interactionManager.clickSlot(handler.syncId, slotToClick, 0, SlotActionType.PICKUP, mc.player);
+        currentState = State.WAITING_DEPOSIT_MENU;
         delayCounter = actionDelay.get() * 2;
+    } else {
+        warning("No items found in order menu");
+        currentState = State.RETRY_SEQUENCE;
+    }
+}
+
+private void handleWaitingDepositMenu(ScreenHandler handler) {
+    if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 4) {
+        info("Deposit menu detected (4 rows)");
+        currentState = State.DEPOSITING_BONES;
+        delayCounter = actionDelay.get();
+    }
+}
+
+private void handleDepositingBones(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler container)) {
+        currentState = State.RETRY_SEQUENCE;
+        return;
     }
 
-    private void handleWaitingConfirmMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 3) {
-            info("Confirm menu detected (3 rows)");
-            currentState = State.CLICK_CONFIRM_SLOT;
-            delayCounter = actionDelay.get();
+    int containerSlots = container.getRows() * 9;
+    boolean chestFull = true;
+
+    for (int i = 0; i < containerSlots; i++) {
+        ItemStack stack = container.getSlot(i).getStack();
+        if (stack.isEmpty() || (stack.getItem() == Items.BONE && stack.getCount() < stack.getMaxCount())) {
+            chestFull = false;
+            break;
         }
     }
 
-    private void handleClickConfirmSlot(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler)) {
-            currentState = State.RETRY_SEQUENCE;
-            return;
-        }
-
-        info("Clicking slot 15 to confirm");
-        mc.interactionManager.clickSlot(handler.syncId, 15, 0, SlotActionType.PICKUP, mc.player);
-
-        chatMessageReceived = false;
-        waitingForChatMessage = true;
-        waitingForProfitMessage = false;
-        currentState = State.WAITING_FOR_CHAT_CONFIRMATION;
-        delayCounter = 5;
-        timeoutCounter = 0;
-    }
-
-    private void handleWaitingForChatConfirmation() {
-        timeoutCounter++;
-
-        if (chatMessageReceived) {
-            info("Order successfully delivered! Closing inventories...");
-            waitingForChatMessage = false;
-            currentState = State.CLOSING_FIRST_INVENTORY;
-            delayCounter = 0;
-            return;
-        }
-
-        if (orderExpiredCheck.get() && timeoutCounter >= orderExpiredTimeout.get()) {
-            warning("Order expired - no chat confirmation received");
-            waitingForChatMessage = false;
-            waitingForProfitMessage = false;
-            mc.player.closeHandledScreen();
-
-            currentState = SMPUtils.playerHasBones() ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
-            delayCounter = actionDelay.get() * 2;
-            info(SMPUtils.playerHasBones() ? "Player still has bones, retrying" : "No bones, restarting");
-        }
-    }
-
-    private void handleClosingFirstInventory() {
-        info("Closing first inventory");
-        mc.player.closeHandledScreen();
-        currentState = State.CLOSING_SECOND_INVENTORY;
-        delayCounter = inventoryClosingDelay.get();
-    }
-
-    private void handleClosingSecondInventory() {
-        info("Closing second inventory");
-        mc.player.closeHandledScreen();
-        currentState = State.LOOP_DELAY;
-        delayCounter = loopDelay.get();
-    }
-
-    private void handleLoopDelay() {
-        info("Loop delay complete");
-        boolean hasBones = SMPUtils.playerHasBones();
-        currentState = hasBones ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
-        delayCounter = actionDelay.get() * 2;
-        info(hasBones ? "Restarting from /order bones" : "Restarting from spawner");
-    }
-
-    private void handleRetrySequence() {
-        info("Retrying sequence");
-        mc.player.closeHandledScreen();
-
-        boolean hasBones = SMPUtils.playerHasBones();
-        currentState = hasBones ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
-        delayCounter = actionDelay.get() * 3;
-        timeoutCounter = 0;
-        targetSpawner = null;
-    }
-
-    private void handleProtectDetectionWait() {
-        info("Detection wait complete, checking for lime glass...");
-        currentState = State.PROTECT_CHECK_LIME_GLASS;
-        delayCounter = 0;
-    }
-
-    private void handleProtectCheckLimeGlass(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
-            ItemStack slot50 = container.getSlot(50).getStack();
-            if (!slot50.isEmpty() && slot50.getItem() == Items.LIME_STAINED_GLASS_PANE) {
-                info("Lime glass detected - spawner is active");
-                currentState = State.PROTECT_WAIT_AFTER_LIME_GLASS;
-                delayCounter = 10;
+    boolean foundBones = false;
+    for (int i = containerSlots; i < container.slots.size(); i++) {
+        ItemStack stack = container.getSlot(i).getStack();
+        if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
+            foundBones = true;
+            if (!chestFull) {
+                info("Moving bones from slot " + i);
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                delayCounter = actionDelay.get();
                 return;
             }
         }
-
-        info("No lime glass detected, proceeding...");
-        currentState = State.PROTECT_CLOSE_ALL_INVENTORIES;
-        delayCounter = 5;
     }
 
-    private void handleProtectWaitAfterLimeGlass() {
-        info("Wait after lime glass check complete");
-        currentState = State.PROTECT_CLOSE_ALL_INVENTORIES;
+    if (!foundBones || chestFull) {
+        info(chestFull ? "Chest is full, proceeding" : "All bones deposited");
+        currentState = State.CLOSING_DEPOSIT_MENU;
+        delayCounter = actionDelay.get();
+    }
+}
+
+private void handleClosingDepositMenu() {
+    info("Closing deposit menu");
+    mc.player.closeHandledScreen();
+    currentState = State.WAITING_CONFIRM_MENU;
+    delayCounter = actionDelay.get() * 2;
+}
+
+private void handleWaitingConfirmMenu(ScreenHandler handler) {
+    if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 3) {
+        info("Confirm menu detected (3 rows)");
+        currentState = State.CLICK_CONFIRM_SLOT;
+        delayCounter = actionDelay.get();
+    }
+}
+
+private void handleClickConfirmSlot(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler)) {
+        currentState = State.RETRY_SEQUENCE;
+        return;
+    }
+
+    info("Clicking slot 15 to confirm");
+    mc.interactionManager.clickSlot(handler.syncId, 15, 0, SlotActionType.PICKUP, mc.player);
+
+    chatMessageReceived = false;
+    waitingForChatMessage = true;
+    waitingForProfitMessage = false;
+    currentState = State.WAITING_FOR_CHAT_CONFIRMATION;
+    delayCounter = 5;
+    timeoutCounter = 0;
+}
+
+private void handleWaitingForChatConfirmation() {
+    timeoutCounter++;
+
+    if (chatMessageReceived) {
+        info("Order successfully delivered! Closing inventories...");
+        waitingForChatMessage = false;
+        currentState = State.CLOSING_FIRST_INVENTORY;
         delayCounter = 0;
+        return;
     }
 
-    private void handleProtectCloseAllInventories() {
-        info("Closing all inventories");
+    if (orderExpiredCheck.get() && timeoutCounter >= orderExpiredTimeout.get()) {
+        warning("Order expired - no chat confirmation received");
+        waitingForChatMessage = false;
+        waitingForProfitMessage = false;
         mc.player.closeHandledScreen();
-        currentState = State.OPENED_CHEST_CHECK;
-        delayCounter = 5;
-    }
 
-    private void handleOpenedChestCheck(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler) {
-            info("Still have an inventory open, closing it...");
-            mc.player.closeHandledScreen();
-            delayCounter = 5;
+        currentState = SMPUtils.playerHasBones() ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
+        delayCounter = actionDelay.get() * 2;
+        info(SMPUtils.playerHasBones() ? "Player still has bones, retrying" : "No bones, restarting");
+    }
+}
+
+private void handleClosingFirstInventory() {
+    info("Closing first inventory");
+    mc.player.closeHandledScreen();
+    currentState = State.CLOSING_SECOND_INVENTORY;
+    delayCounter = inventoryClosingDelay.get();
+}
+
+private void handleClosingSecondInventory() {
+    info("Closing second inventory");
+    mc.player.closeHandledScreen();
+    currentState = State.LOOP_DELAY;
+    delayCounter = loopDelay.get();
+}
+
+private void handleLoopDelay() {
+    info("Loop delay complete");
+    boolean hasBones = SMPUtils.playerHasBones();
+    currentState = hasBones ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
+    delayCounter = actionDelay.get() * 2;
+    info(hasBones ? "Restarting from /order bones" : "Restarting from spawner");
+}
+
+private void handleRetrySequence() {
+    info("Retrying sequence");
+    mc.player.closeHandledScreen();
+
+    boolean hasBones = SMPUtils.playerHasBones();
+    currentState = hasBones ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
+    delayCounter = actionDelay.get() * 3;
+    timeoutCounter = 0;
+    targetSpawner = null;
+}
+
+private void handleProtectDetectionWait() {
+    info("Detection wait complete, checking for lime glass...");
+    currentState = State.PROTECT_CHECK_LIME_GLASS;
+    delayCounter = 0;
+}
+
+private void handleProtectCheckLimeGlass(ScreenHandler handler) {
+    if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
+        ItemStack slot50 = container.getSlot(50).getStack();
+        if (!slot50.isEmpty() && slot50.getItem() == Items.LIME_STAINED_GLASS_PANE) {
+            info("Lime glass detected - spawner is active");
+            currentState = State.PROTECT_WAIT_AFTER_LIME_GLASS;
+            delayCounter = 10;
             return;
         }
-
-        info("All inventories closed, starting initial wait");
-        currentState = State.PROTECT_INITIAL_WAIT;
-        delayCounter = 20;
     }
 
-    private void handleProtectInitialWait() {
-        info("Initial wait complete, checking inventory...");
-        currentState = State.PROTECT_CHECK_INVENTORY;
+    info("No lime glass detected, proceeding...");
+    currentState = State.PROTECT_CLOSE_ALL_INVENTORIES;
+    delayCounter = 5;
+}
+
+private void handleProtectWaitAfterLimeGlass() {
+    info("Wait after lime glass check complete");
+    currentState = State.PROTECT_CLOSE_ALL_INVENTORIES;
+    delayCounter = 0;
+}
+
+private void handleProtectCloseAllInventories() {
+    info("Closing all inventories");
+    mc.player.closeHandledScreen();
+    currentState = State.OPENED_CHEST_CHECK;
+    delayCounter = 5;
+}
+
+private void handleOpenedChestCheck(ScreenHandler handler) {
+    if (handler instanceof GenericContainerScreenHandler) {
+        info("Still have an inventory open, closing it...");
+        mc.player.closeHandledScreen();
+        delayCounter = 5;
+        return;
+    }
+
+    info("All inventories closed, starting initial wait");
+    currentState = State.PROTECT_INITIAL_WAIT;
+    delayCounter = 20;
+}
+
+private void handleProtectInitialWait() {
+    info("Initial wait complete, checking inventory...");
+    currentState = State.PROTECT_CHECK_INVENTORY;
+    delayCounter = 0;
+}
+
+private void handleProtectOpenPlayerInventory() {
+    info("Opening player inventory to check contents");
+    currentState = State.PROTECT_CHECK_INVENTORY;
+    delayCounter = 0;
+}
+
+private void handleProtectCheckInventory() {
+    if (SMPUtils.isInventoryFull()) {
+        info("Inventory is full! Looking for chest to deposit bones...");
+        currentState = State.PROTECT_FIND_CHEST;
+        delayCounter = 0;
+    } else {
+        info("Inventory has space. Proceeding to spawner mining...");
+        SMPUtils.setSneaking(true, sneakingState);
+        currentState = State.PROTECT_GOING_TO_SPAWNERS;
         delayCounter = 0;
     }
+}
 
-    private void handleProtectOpenPlayerInventory() {
-        info("Opening player inventory to check contents");
-        currentState = State.PROTECT_CHECK_INVENTORY;
+private void handleProtectFindChest() {
+    tempBoneChest = SMPUtils.findNearestChestForBones();
+
+    if (tempBoneChest == null) {
+        warning("No chest found for bone deposit! Proceeding to spawner mining...");
+        SMPUtils.setSneaking(true, sneakingState);
+        currentState = State.PROTECT_GOING_TO_SPAWNERS;
         delayCounter = 0;
+        return;
     }
 
-    private void handleProtectCheckInventory() {
-        if (SMPUtils.isInventoryFull()) {
-            info("Inventory is full! Looking for chest to deposit bones...");
-            currentState = State.PROTECT_FIND_CHEST;
-            delayCounter = 0;
-        } else {
-            info("Inventory has space. Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-        }
+    info("Found chest at " + tempBoneChest + " for bone deposit");
+    currentState = State.PROTECT_OPEN_CHEST;
+    boneChestOpenAttempts = 0;
+    delayCounter = 5;
+}
+
+private void handleProtectOpenChest() {
+    if (tempBoneChest == null) {
+        currentState = State.PROTECT_FIND_CHEST;
+        return;
     }
 
-    private void handleProtectFindChest() {
-        tempBoneChest = SMPUtils.findNearestChestForBones();
-
-        if (tempBoneChest == null) {
-            warning("No chest found for bone deposit! Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-            return;
+    if (smoothAim.get() && !SmoothAimUtils.isRotating()) {
+        if (boneChestOpenAttempts % 3 == 0) {
+            SmoothAimUtils.startSmoothRotation(tempBoneChest, rotationSpeed.get(), () -> {
+                SMPUtils.interactWithBlock(tempBoneChest);
+                info("Opening chest for bone deposit... (attempt " + (boneChestOpenAttempts / 3 + 1) + ")");
+            });
         }
-
-        info("Found chest at " + tempBoneChest + " for bone deposit");
-        currentState = State.PROTECT_OPEN_CHEST;
-        boneChestOpenAttempts = 0;
-        delayCounter = 5;
-    }
-
-    private void handleProtectOpenChest() {
-        if (tempBoneChest == null) {
-            currentState = State.PROTECT_FIND_CHEST;
-            return;
-        }
-
+    } else if (!smoothAim.get()) {
         SMPUtils.lookAtBlock(tempBoneChest);
-
         if (boneChestOpenAttempts % 3 == 0) {
             SMPUtils.interactWithBlock(tempBoneChest);
             info("Opening chest for bone deposit... (attempt " + (boneChestOpenAttempts / 3 + 1) + ")");
         }
-
-        boneChestOpenAttempts++;
-
-        if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
-            currentState = State.PROTECT_DEPOSIT_BONES_TO_CHEST;
-            lastProcessedSlot = -1;
-            info("Chest opened successfully! Depositing bones...");
-            delayCounter = 2;
-        }
-
-        if (boneChestOpenAttempts > 60) {
-            warning("Failed to open chest! Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-        }
+    } else {
+        return;
     }
 
-    private void handleProtectDepositBonesToChest(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler container)) {
-            currentState = State.PROTECT_OPEN_CHEST;
-            boneChestOpenAttempts = 0;
-            return;
-        }
+    boneChestOpenAttempts++;
 
-        int containerSlots = container.getRows() * 9;
-        boolean foundBones = false;
-
-        for (int i = containerSlots; i < container.slots.size(); i++) {
-            ItemStack stack = container.getSlot(i).getStack();
-            if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
-                foundBones = true;
-                info("Depositing bones from slot " + i + " to chest");
-                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                delayCounter = 2;
-                return;
-            }
-        }
-
-        if (!foundBones) {
-            info("All bones deposited to chest!");
-            currentState = State.PROTECT_CLOSE_CHEST;
-            delayCounter = 2;
-        }
+    if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
+        currentState = State.PROTECT_DEPOSIT_BONES_TO_CHEST;
+        lastProcessedSlot = -1;
+        info("Chest opened successfully! Depositing bones...");
+        delayCounter = 2;
     }
 
-    private void handleProtectCloseChest() {
-        info("Closing chest after bone deposit");
-        mc.player.closeHandledScreen();
-        tempBoneChest = null;
-        currentState = State.PROTECT_RECHECK_WAIT;
-        delayCounter = 10;
-    }
-
-    private void handleProtectRecheckWait() {
-        info("Recheck wait complete, checking inventory again...");
-        currentState = State.PROTECT_CHECK_INVENTORY;
+    if (boneChestOpenAttempts > 60) {
+        warning("Failed to open chest! Proceeding to spawner mining...");
+        SMPUtils.setSneaking(true, sneakingState);
+        currentState = State.PROTECT_GOING_TO_SPAWNERS;
         delayCounter = 0;
     }
+}
 
-    private void handleProtectGoingToSpawners() {
-        SMPUtils.setSneaking(true, sneakingState);
+private void handleProtectDepositBonesToChest(ScreenHandler handler) {
+    if (!(handler instanceof GenericContainerScreenHandler container)) {
+        currentState = State.PROTECT_OPEN_CHEST;
+        boneChestOpenAttempts = 0;
+        return;
+    }
 
-        if (!SMPUtils.isHoldingDiamondPickaxe()) {
-            int pickaxeSlot = SMPUtils.findDiamondPickaxeInHotbar();
-            if (pickaxeSlot == -1) {
-                warning("No diamond pickaxe found in hotbar!");
-                SMPUtils.stopBreaking();
-                currentState = State.PROTECT_GOING_TO_CHEST;
-                info("Skipping spawner mining, going to chest...");
-                protectTickCounter = 0;
-                return;
-            }
+    int containerSlots = container.getRows() * 9;
+    boolean foundBones = false;
 
-            SMPUtils.swapPickaxeToSlot0(pickaxeSlot);
-            info("Moved diamond pickaxe to slot 1");
-            delayCounter = 3;
+    for (int i = containerSlots; i < container.slots.size(); i++) {
+        ItemStack stack = container.getSlot(i).getStack();
+        if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
+            foundBones = true;
+            info("Depositing bones from slot " + i + " to chest");
+            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+            delayCounter = 2;
+            return;
+        }
+    }
+
+    if (!foundBones) {
+        info("All bones deposited to chest!");
+        currentState = State.PROTECT_CLOSE_CHEST;
+        delayCounter = 2;
+    }
+}
+
+private void handleProtectCloseChest() {
+    info("Closing chest after bone deposit");
+    mc.player.closeHandledScreen();
+    tempBoneChest = null;
+    currentState = State.PROTECT_RECHECK_WAIT;
+    delayCounter = 10;
+}
+
+private void handleProtectRecheckWait() {
+    info("Recheck wait complete, checking inventory again...");
+    currentState = State.PROTECT_CHECK_INVENTORY;
+    delayCounter = 0;
+}
+
+private void handleProtectGoingToSpawners() {
+    SMPUtils.setSneaking(true, sneakingState);
+
+    if (!SMPUtils.isHoldingDiamondPickaxe()) {
+        int pickaxeSlot = SMPUtils.findDiamondPickaxeInHotbar();
+        if (pickaxeSlot == -1) {
+            warning("No diamond pickaxe found in hotbar!");
+            SMPUtils.stopBreaking();
+            currentState = State.PROTECT_GOING_TO_CHEST;
+            info("Skipping spawner mining, going to chest...");
+            protectTickCounter = 0;
             return;
         }
 
-        if (currentProtectTarget == null) {
-            BlockPos found = SMPUtils.findNearestSpawner(entitiesRange.get());
+        SMPUtils.swapPickaxeToSlot0(pickaxeSlot);
+        info("Moved diamond pickaxe to slot 1");
+        delayCounter = 3;
+        return;
+    }
 
-            if (found == null) {
-                SMPUtils.stopBreaking();
-                spawnersMinedSuccessfully = true;
-                currentProtectTarget = null;
-                currentState = State.PROTECT_GOING_TO_CHEST;
-                info("All spawners mined! Looking for ender chest...");
-                protectTickCounter = 0;
-                return;
-            }
+    if (currentProtectTarget == null) {
+        BlockPos found = SMPUtils.findNearestSpawner(entitiesRange.get());
 
-            currentProtectTarget = found;
-            isMiningCycle = true;
-            miningCycleTimer = 0;
-            info("Starting to mine spawner at " + currentProtectTarget);
+        if (found == null) {
+            SMPUtils.stopBreaking();
+            spawnersMinedSuccessfully = true;
+            currentProtectTarget = null;
+            currentState = State.PROTECT_GOING_TO_CHEST;
+            info("All spawners mined! Looking for ender chest...");
+            protectTickCounter = 0;
+            return;
         }
 
-        if (isMiningCycle) {
+        currentProtectTarget = found;
+        isMiningCycle = true;
+        miningCycleTimer = 0;
+        info("Starting to mine spawner at " + currentProtectTarget);
+    }
+
+    if (isMiningCycle) {
+        if (smoothAim.get() && !SmoothAimUtils.isRotating()) {
+            SmoothAimUtils.startSmoothRotation(currentProtectTarget, rotationSpeed.get(), () -> {
+                SMPUtils.breakBlock(currentProtectTarget);
+            });
+        } else if (!smoothAim.get()) {
             SMPUtils.lookAtBlock(currentProtectTarget);
             SMPUtils.breakBlock(currentProtectTarget);
+        }
 
-            if (mc.world.getBlockState(currentProtectTarget).isAir()) {
-                info("Spawner at " + currentProtectTarget + " broken!");
-                SMPUtils.stopBreaking();
-                isMiningCycle = false;
-                miningCycleTimer = 0;
-                currentProtectTarget = null;
-                transferDelayCounter = 5;
-            }
-        } else {
-            miningCycleTimer++;
-            if (miningCycleTimer >= PAUSE_DURATION) {
-                // Pause complete
-            }
+        if (mc.world.getBlockState(currentProtectTarget).isAir()) {
+            info("Spawner at " + currentProtectTarget + " broken!");
+            SMPUtils.stopBreaking();
+            isMiningCycle = false;
+            miningCycleTimer = 0;
+            currentProtectTarget = null;
+            transferDelayCounter = 5;
+        }
+    } else {
+        miningCycleTimer++;
+        if (miningCycleTimer >= PAUSE_DURATION) {
+            // Pause complete
         }
     }
+}
 
-    private void handleProtectGoingToChest() {
-        SMPUtils.setSneaking(true, sneakingState);
+private void handleProtectGoingToChest() {
+    SMPUtils.setSneaking(true, sneakingState);
 
+    if (targetChest == null) {
+        targetChest = SMPUtils.findNearestEnderChest();
         if (targetChest == null) {
-            targetChest = SMPUtils.findNearestEnderChest();
-            if (targetChest == null) {
-                info("No ender chest found nearby!");
-                currentState = State.PROTECT_DISCONNECTING;
-                return;
-            }
-            info("Found ender chest at " + targetChest);
-        }
-
-        SMPUtils.moveTowardsBlock(targetChest);
-
-        if (mc.player.getBlockPos().getSquaredDistance(targetChest) <= 9) {
-            currentState = State.PROTECT_OPENING_CHEST;
-            chestOpenAttempts = 0;
-            info("Reached ender chest. Attempting to open...");
-        }
-
-        if (protectTickCounter > 600) {
-            ChatUtils.error("Timed out trying to reach ender chest!");
+            info("No ender chest found nearby!");
             currentState = State.PROTECT_DISCONNECTING;
-        }
-    }
-
-    private void handleProtectOpeningChest() {
-        if (targetChest == null) {
-            currentState = State.PROTECT_GOING_TO_CHEST;
             return;
         }
+        info("Found ender chest at " + targetChest);
+    }
 
-        SMPUtils.setSneaking(false, sneakingState);
-        SMPUtils.stopMoving();
-        SMPUtils.setJumping(true);
+    SMPUtils.moveTowardsBlock(targetChest);
 
+    if (mc.player.getBlockPos().getSquaredDistance(targetChest) <= 9) {
+        currentState = State.PROTECT_OPENING_CHEST;
+        chestOpenAttempts = 0;
+        info("Reached ender chest. Attempting to open...");
+    }
+
+    if (protectTickCounter > 600) {
+        ChatUtils.error("Timed out trying to reach ender chest!");
+        currentState = State.PROTECT_DISCONNECTING;
+    }
+}
+
+private void handleProtectOpeningChest() {
+    if (targetChest == null) {
+        currentState = State.PROTECT_GOING_TO_CHEST;
+        return;
+    }
+
+    SMPUtils.setSneaking(false, sneakingState);
+    SMPUtils.stopMoving();
+    SMPUtils.setJumping(true);
+
+    if (smoothAim.get() && !SmoothAimUtils.isRotating()) {
+        if (chestOpenAttempts < 20) {
+            if (chestOpenAttempts % 5 == 0) {
+                SmoothAimUtils.startSmoothRotation(targetChest, rotationSpeed.get(), () -> {
+                    SMPUtils.interactWithBlock(targetChest);
+                    info("Right-clicking ender chest... (attempt " + (chestOpenAttempts / 5 + 1) + ")");
+                });
+            }
+        }
+    } else if (!smoothAim.get()) {
         if (chestOpenAttempts < 20) {
             SMPUtils.lookAtBlock(targetChest);
         }
-
         if (chestOpenAttempts % 5 == 0) {
             SMPUtils.interactWithBlock(targetChest);
             info("Right-clicking ender chest... (attempt " + (chestOpenAttempts / 5 + 1) + ")");
         }
-
+    } else {
         chestOpenAttempts++;
-
-        if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
-            SMPUtils.setJumping(false);
-            currentState = State.PROTECT_DEPOSITING_ITEMS;
-            lastProcessedSlot = -1;
-            protectTickCounter = 0;
-            info("Ender chest opened successfully!");
-        }
-
-        if (chestOpenAttempts > 200) {
-            SMPUtils.setJumping(false);
-            ChatUtils.error("Failed to open ender chest!");
-            currentState = State.PROTECT_DISCONNECTING;
-        }
+        return;
     }
 
-    private void handleProtectDepositingItems() {
-        if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler) {
-            if (!SMPUtils.hasItemsToDepositFiltered()) {
-                itemsDepositedSuccessfully = true;
-                info("All items deposited successfully!");
-                mc.player.closeHandledScreen();
-                transferDelayCounter = 10;
-                currentState = State.PROTECT_DISCONNECTING;
-                return;
-            }
+    chestOpenAttempts++;
 
-            int[] lastSlot = {lastProcessedSlot};
-            int[] transferDelay = {transferDelayCounter};
-            SMPUtils.transferFilteredItemsToChest(handler, lastSlot, transferDelay, this);
-            lastProcessedSlot = lastSlot[0];
-            transferDelayCounter = transferDelay[0];
-
-        } else {
-            currentState = State.PROTECT_OPENING_CHEST;
-            chestOpenAttempts = 0;
-        }
-
-        if (protectTickCounter > 900) {
-            ChatUtils.error("Timed out depositing items!");
-            currentState = State.PROTECT_DISCONNECTING;
-        }
+    if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
+        SMPUtils.setJumping(false);
+        currentState = State.PROTECT_DEPOSITING_ITEMS;
+        lastProcessedSlot = -1;
+        protectTickCounter = 0;
+        info("Ender chest opened successfully!");
     }
 
-    private void handleProtectDisconnecting() {
-        cleanupControls();
-        sendWebhookNotification();
-
-        String message = emergencyDisconnect
-            ? "SpawnerProtect: " + emergencyReason + ". Successfully disconnected."
-            : "SpawnerProtect: " + detectedEntity + " detected. Successfully disconnected.";
-        info(message);
-
-        if (mc.world != null) {
-            mc.world.disconnect(Text.literal("Entity detected - SpawnerProtect"));
-        }
-
-        info("Disconnected due to entity detection.");
-        toggle();
+    if (chestOpenAttempts > 200) {
+        SMPUtils.setJumping(false);
+        ChatUtils.error("Failed to open ender chest!");
+        currentState = State.PROTECT_DISCONNECTING;
     }
 }
 
+private void handleProtectDepositingItems() {
+    if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler) {
+        if (!SMPUtils.hasItemsToDepositFiltered()) {
+            itemsDepositedSuccessfully = true;
+            info("All items deposited successfully!");
+            mc.player.closeHandledScreen();
+            transferDelayCounter = 10;
+            currentState = State.PROTECT_DISCONNECTING;
+            return;
+        }
+
+        int[] lastSlot = {lastProcessedSlot};
+        int[] transferDelay = {transferDelayCounter};
+        SMPUtils.transferFilteredItemsToChest(handler, lastSlot, transferDelay, this);
+        lastProcessedSlot = lastSlot[0];
+        transferDelayCounter = transferDelay[0];
+
+    } else {
+        currentState = State.PROTECT_OPENING_CHEST;
+        chestOpenAttempts = 0;
+    }
+
+    if (protectTickCounter > 900) {
+        ChatUtils.error("Timed out depositing items!");
+        currentState = State.PROTECT_DISCONNECTING;
+    }
+}
+
+private void handleProtectDisconnecting() {
+    cleanupControls();
+    sendWebhookNotification();
+
+    String message = "SpawnerProtect: " + detectedEntity + " detected. Successfully disconnected.";
+    info(message);
+
+    if (mc.world != null) {
+        mc.world.disconnect(Text.literal("Entity detected - SpawnerProtect"));
+    }
+
+    info("Disconnected due to entity detection.");
+    toggle();
+}
+}

@@ -2,6 +2,7 @@ package com.example.addon.modules;
 
 import com.example.addon.Main;
 import com.example.addon.utils.hypixel.HypixelUtils;
+import com.example.addon.utils.player.SmoothAimUtils;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.gui.GuiTheme;
@@ -30,7 +31,6 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
-
 public class DragonAssistant extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgWarping = settings.createGroup("Warping");
@@ -50,8 +50,8 @@ public class DragonAssistant extends Module {
         .name("smooth-aim").description("Smooth aiming toggle").defaultValue(false).build());
 
     private final Setting<Integer> rotationSpeed = sgGeneral.add(new IntSetting.Builder()
-        .name("rotation-speed").description("Rotation speed for smooth aim")
-        .defaultValue(0).min(0).max(600).sliderMax(600).visible(() -> smoothAim.get()).build());
+        .name("rotation-speed").description("Rotation speed for smooth aim (ticks)")
+        .defaultValue(10).min(1).max(600).sliderMax(600).visible(() -> smoothAim.get()).build());
 
     // Warping Settings
     private final Setting<WarpLocation> warpLocation = sgWarping.add(new EnumSetting.Builder<WarpLocation>()
@@ -115,32 +115,15 @@ public class DragonAssistant extends Module {
     private int eyesPlaced = 0;
     private int remnantsThrown = 0;
     private boolean isUsingBow = false;
-    private boolean isHoldingChimera = false;
     private boolean isSneaking = false;
     private int dragonDeathTimer = 0;
     private int eyesToMove = 0;
-
-    // Rotation tracking
-    private boolean shouldMaintainRotation = false;
-    private float persistentYaw = 0;
-    private float persistentPitch = 0;
-
-    // Smooth aim
-    private float startYaw = 0;
-    private float startPitch = 0;
-    private float targetYaw = 0;
-    private float targetPitch = 0;
-    private int aimingTicks = 0;
-    private int totalAimTicks = 0;
 
     public DragonAssistant() {
         super(Main.HYPIXEL_SKYBLOCK, "dragon-assistant",
             "Automated dragon fight assistant for Hypixel Skyblock.");
         loadTeleportLocationsFromFile();
     }
-
-    // CONTINUES IN PART 2...
-    // CONTINUED FROM PART 1...
 
     @Override
     public WWidget getWidget(GuiTheme theme) {
@@ -260,9 +243,8 @@ public class DragonAssistant extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
-        if (shouldMaintainRotation) {
-            Rotations.rotate(persistentYaw, persistentPitch);
-        }
+        // Update smooth aim rotation if in progress
+        SmoothAimUtils.tickRotation();
 
         switch (state) {
             case WARPING_TO_END: handleWarpingToEnd(); break;
@@ -275,7 +257,6 @@ public class DragonAssistant extends Module {
             case GETTING_EYES_BZ_INSTA: handleGettingEyesBZInsta(); break;
             case GETTING_EYES_BZ_ORDER: handleGettingEyesBZOrder(); break;
             case PLACING_EYES: handlePlacingEyes(); break;
-            case AIMING_AT_PORTAL: handleAimingAtPortal(); break;
             case PATHING_TO_SHOOTING_POS: handlePathingToShootingPos(); break;
             case AIMING: handleAiming(); break;
             case WAITING_FOR_DRAGON: handleWaitingForDragon(); break;
@@ -303,10 +284,8 @@ public class DragonAssistant extends Module {
     private void resetState() {
         state = SequenceState.IDLE;
         tickCounter = eyesPlaced = remnantsThrown = dragonDeathTimer = eyesToMove = currentLocationIndex = 0;
-        isUsingBow = isHoldingChimera = false;
-        shouldMaintainRotation = false;
-        persistentYaw = persistentPitch = startYaw = startPitch = targetYaw = targetPitch = 0;
-        aimingTicks = totalAimTicks = 0;
+        isUsingBow = false;
+        SmoothAimUtils.cancelRotation();
 
         setSneaking(false);
         if (mc.options != null && mc.options.useKey != null) mc.options.useKey.setPressed(false);
@@ -315,27 +294,21 @@ public class DragonAssistant extends Module {
 
     private void setSneaking(boolean sneak) {
         if (mc.player == null) return;
-        if (sneak && !isSneaking) {
-            mc.player.setSneaking(true);
-            isSneaking = true;
-        } else if (!sneak && isSneaking) {
-            mc.player.setSneaking(false);
-            isSneaking = false;
+        if (sneak != isSneaking) {
+            mc.player.setSneaking(sneak);
+            isSneaking = sneak;
         }
     }
-
-    // CONTINUES IN PART 3...
-    // CONTINUED FROM PART 2...
 
     private void handleWarpingToEnd() {
         if (tickCounter == 0) {
             info("Warping to The End...");
             ChatUtils.sendPlayerMsg("/warp end");
-            tickCounter++;
         } else if (tickCounter >= 40) {
             state = SequenceState.VERIFYING_LOCATION;
-            tickCounter = 0;
-        } else tickCounter++;
+            tickCounter = -1;
+        }
+        tickCounter++;
     }
 
     private void handleVerifyingLocation() {
@@ -360,17 +333,13 @@ public class DragonAssistant extends Module {
     private void handleTeleportingSequence() {
         if (teleportLocations.isEmpty()) {
             info("No teleport locations. Skipping...");
-            state = SequenceState.OPENING_INVENTORY;
-            tickCounter = 0;
+            transitionToInventory();
             return;
         }
 
         if (currentLocationIndex >= teleportLocations.size()) {
             info("Teleports completed!");
-            setSneaking(false);
-            mc.options.useKey.setPressed(false);
-            state = SequenceState.OPENING_INVENTORY;
-            tickCounter = 0;
+            transitionToInventory();
             return;
         }
 
@@ -390,70 +359,51 @@ public class DragonAssistant extends Module {
             }
 
             info("Teleporting to " + location.name);
-
             BlockPos targetPos = new BlockPos(location.x, location.y, location.z);
-            float[] angles = new float[2];
-            HypixelUtils.calculateAimAngles(targetPos, angles);
 
-            startYaw = mc.player.getYaw();
-            startPitch = mc.player.getPitch();
-            targetYaw = angles[0];
-            targetPitch = angles[1];
+            if (smoothAim.get() && rotationSpeed.get() > 0) {
+                float[] angles = new float[2];
+                HypixelUtils.calculateAimAngles(targetPos, angles);
 
-            aimingTicks = 0;
-            totalAimTicks = smoothAim.get() ? rotationSpeed.get() : 10;
-
-            shouldMaintainRotation = true;
-            persistentYaw = startYaw;
-            persistentPitch = startPitch;
-            tickCounter++;
-        } else if (tickCounter <= totalAimTicks) {
-            float progress = (float) aimingTicks / (float) totalAimTicks;
-            float currentYaw = HypixelUtils.lerpAngle(startYaw, targetYaw, progress);
-            float currentPitch = HypixelUtils.lerp(startPitch, targetPitch, progress);
-
-            persistentYaw = currentYaw;
-            persistentPitch = currentPitch;
-            Rotations.rotate(currentYaw, currentPitch);
-
-            aimingTicks++;
-            tickCounter++;
-        } else if (tickCounter == totalAimTicks + 1) {
-            persistentYaw = targetYaw;
-            persistentPitch = targetPitch;
-            Rotations.rotate(targetYaw, targetPitch);
-
-            BlockPos targetPos = new BlockPos(location.x, location.y, location.z);
-            info("Teleporting to " + location.name + "!");
-
-            if (mc.interactionManager != null) {
-                mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
-                    new BlockHitResult(Vec3d.ofCenter(targetPos), Direction.UP, targetPos, false));
+                SmoothAimUtils.startSmoothRotation(angles[0], angles[1], rotationSpeed.get(),
+                    () -> teleportToPosition(targetPos, location.name));
+            } else {
+                float[] angles = new float[2];
+                HypixelUtils.calculateAimAngles(targetPos, angles);
+                Rotations.rotate(angles[0], angles[1], () -> teleportToPosition(targetPos, location.name));
             }
-            tickCounter++;
-        } else if (tickCounter <= totalAimTicks + 8) {
-            Rotations.rotate(targetYaw, targetPitch);
-            tickCounter++;
-        } else if (tickCounter >= totalAimTicks + 9 + teleportingDelay.get()) {
-            startYaw = targetYaw;
-            startPitch = targetPitch;
+            tickCounter = 1;
+        } else if (tickCounter >= getRotationTicks() + teleportingDelay.get() + 10) {
             currentLocationIndex++;
-            tickCounter = aimingTicks = 0;
+            tickCounter = 0;
         } else {
-            Rotations.rotate(targetYaw, targetPitch);
             tickCounter++;
         }
+    }
+
+    private void teleportToPosition(BlockPos pos, String name) {
+        if (mc.interactionManager != null) {
+            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+                new BlockHitResult(Vec3d.ofCenter(pos), Direction.UP, pos, false));
+        }
+    }
+
+    private void transitionToInventory() {
+        setSneaking(false);
+        mc.options.useKey.setPressed(false);
+        state = SequenceState.OPENING_INVENTORY;
+        tickCounter = 0;
     }
 
     private void handleOpeningInventory() {
         if (tickCounter == 0) {
             mc.setScreen(new InventoryScreen(mc.player));
-            tickCounter++;
         } else if (tickCounter > 5 && mc.currentScreen instanceof InventoryScreen) {
             info("Checking for Summoning Eyes...");
             state = SequenceState.CHECKING_INVENTORY;
-            tickCounter = 0;
-        } else tickCounter++;
+            tickCounter = -1;
+        }
+        tickCounter++;
     }
 
     private void handleCheckingInventory() {
@@ -520,18 +470,17 @@ public class DragonAssistant extends Module {
             return;
         }
 
-        int sourceSlot = HypixelUtils.findSummoningEyeInMainInventory();
-        if (sourceSlot == -1) {
-            error("ERROR: Cannot find eye!");
-            toggle();
-            return;
-        }
-
         if (tickCounter % 5 == 0) {
+            int sourceSlot = HypixelUtils.findSummoningEyeInMainInventory();
+            if (sourceSlot == -1) {
+                error("ERROR: Cannot find eye!");
+                toggle();
+                return;
+            }
+
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId,
                 sourceSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
             eyesToMove--;
-            tickCounter = 0;
         }
         tickCounter++;
     }
@@ -539,63 +488,54 @@ public class DragonAssistant extends Module {
     private void handleGettingEyesStash() {
         if (tickCounter == 0) {
             ChatUtils.sendPlayerMsg("/pickupstash");
-            tickCounter++;
         } else if (tickCounter > 40) {
             state = SequenceState.OPENING_INVENTORY;
-            tickCounter = 0;
-        } else tickCounter++;
+            tickCounter = -1;
+        }
+        tickCounter++;
     }
 
     private void handleGettingEyesBZInsta() {
         if (tickCounter == 0) {
             ChatUtils.sendPlayerMsg("/bz summoning eye");
-            tickCounter++;
         } else if (tickCounter == 20 && mc.currentScreen instanceof GenericContainerScreen screen) {
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, 11, 0, SlotActionType.PICKUP, mc.player);
-            tickCounter++;
         } else if (tickCounter == 40 && mc.currentScreen instanceof GenericContainerScreen screen) {
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, 9, 0, SlotActionType.PICKUP, mc.player);
-            tickCounter++;
         } else if (tickCounter == 60 && mc.currentScreen instanceof GenericContainerScreen screen) {
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, 14, 0, SlotActionType.PICKUP, mc.player);
             mc.player.closeHandledScreen();
-            tickCounter++;
         } else if (tickCounter == 80) {
             state = SequenceState.OPENING_INVENTORY;
-            tickCounter = 0;
-        } else tickCounter++;
+            tickCounter = -1;
+        }
+        tickCounter++;
     }
 
     private void handleGettingEyesBZOrder() {
         if (tickCounter == 0) {
             ChatUtils.sendPlayerMsg("/bz");
-            tickCounter++;
         } else if (tickCounter == 20 && mc.currentScreen instanceof GenericContainerScreen screen) {
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, 50, 0, SlotActionType.PICKUP, mc.player);
-            tickCounter++;
         } else if (tickCounter == 40 && mc.currentScreen instanceof GenericContainerScreen screen) {
             mc.interactionManager.clickSlot(screen.getScreenHandler().syncId, 19, 0, SlotActionType.PICKUP, mc.player);
             mc.player.closeHandledScreen();
-            tickCounter++;
         } else if (tickCounter == 60) {
             state = SequenceState.OPENING_INVENTORY;
-            tickCounter = 0;
-        } else tickCounter++;
+            tickCounter = -1;
+        }
+        tickCounter++;
     }
-
-    // CONTINUES IN PART 4...
-    // CONTINUED FROM PART 3...
 
     private void handlePlacingEyes() {
         if (eyesPlaced >= eyesToPlace.get().getCount()) {
             info("All eyes placed!");
-            shouldMaintainRotation = false;
             state = SequenceState.PATHING_TO_SHOOTING_POS;
             tickCounter = 0;
             return;
         }
 
-        if (tickCounter == 0) {
+        if (tickCounter <= 0) {
             int slot = HypixelUtils.findSummoningEyeSlot();
             if (slot == -1) {
                 error("ERROR: No eye in hotbar!");
@@ -605,71 +545,34 @@ public class DragonAssistant extends Module {
             InvUtils.swap(slot, false);
 
             BlockPos framePos = HypixelUtils.findVisibleEndPortalFrame(portalFrameRange.get());
-            if (framePos != null) {
-                targetYaw = (float) Rotations.getYaw(framePos);
-                targetPitch = (float) Rotations.getPitch(framePos);
-
-                if (smoothAim.get() && rotationSpeed.get() > 0) {
-                    startYaw = mc.player.getYaw();
-                    startPitch = mc.player.getPitch();
-                    aimingTicks = 0;
-                    totalAimTicks = rotationSpeed.get();
-
-                    shouldMaintainRotation = true;
-                    persistentYaw = startYaw;
-                    persistentPitch = startPitch;
-
-                    state = SequenceState.AIMING_AT_PORTAL;
-                    tickCounter = 0;
-                } else {
-                    shouldMaintainRotation = true;
-                    persistentYaw = targetYaw;
-                    persistentPitch = targetPitch;
-
-                    Rotations.rotate(targetYaw, targetPitch, () ->
-                        HypixelUtils.placeEyeOnPortalFrame(framePos));
-                    eyesPlaced++;
-                    info("Placed eye " + eyesPlaced + "/" + eyesToPlace.get().getCount());
-                    tickCounter = -placingDelay.get();
-                }
-            } else {
+            if (framePos == null) {
                 error("ERROR: No portal frame found!");
                 toggle();
                 return;
             }
+
+            float targetYaw = (float) Rotations.getYaw(framePos);
+            float targetPitch = (float) Rotations.getPitch(framePos);
+
+            if (smoothAim.get() && rotationSpeed.get() > 0) {
+                SmoothAimUtils.startSmoothRotation(targetYaw, targetPitch, rotationSpeed.get(),
+                    () -> placeEyeCallback(framePos));
+            } else {
+                Rotations.rotate(targetYaw, targetPitch, () -> placeEyeCallback(framePos));
+            }
+
+            tickCounter = 1;
+        } else if (tickCounter >= getRotationTicks() + placingDelay.get()) {
+            tickCounter = 0;
+        } else {
+            tickCounter++;
         }
-        tickCounter++;
-        if (tickCounter > 0) tickCounter = 0;
     }
 
-    private void handleAimingAtPortal() {
-        if (aimingTicks >= totalAimTicks) {
-            BlockPos framePos = HypixelUtils.findVisibleEndPortalFrame(portalFrameRange.get());
-            if (framePos != null) {
-                persistentYaw = targetYaw;
-                persistentPitch = targetPitch;
-
-                Rotations.rotate(targetYaw, targetPitch, () ->
-                    HypixelUtils.placeEyeOnPortalFrame(framePos));
-                eyesPlaced++;
-                info("Placed eye " + eyesPlaced + "/" + eyesToPlace.get().getCount());
-                state = SequenceState.PLACING_EYES;
-                tickCounter = -placingDelay.get();
-            } else {
-                error("ERROR: Portal frame disappeared!");
-                toggle();
-            }
-            return;
-        }
-
-        float progress = (float) aimingTicks / (float) totalAimTicks;
-        float currentYaw = HypixelUtils.lerpAngle(startYaw, targetYaw, progress);
-        float currentPitch = HypixelUtils.lerp(startPitch, targetPitch, progress);
-
-        persistentYaw = currentYaw;
-        persistentPitch = currentPitch;
-        Rotations.rotate(currentYaw, currentPitch);
-        aimingTicks++;
+    private void placeEyeCallback(BlockPos framePos) {
+        HypixelUtils.placeEyeOnPortalFrame(framePos);
+        eyesPlaced++;
+        info("Placed eye " + eyesPlaced + "/" + eyesToPlace.get().getCount());
     }
 
     private void handlePathingToShootingPos() {
@@ -684,46 +587,23 @@ public class DragonAssistant extends Module {
     private void handleAiming() {
         if (smoothAim.get() && rotationSpeed.get() > 0) {
             if (tickCounter == 0) {
-                startYaw = mc.player.getYaw();
-                startPitch = mc.player.getPitch();
-                targetYaw = 179;
-                targetPitch = -88;
-                aimingTicks = 0;
-                totalAimTicks = rotationSpeed.get();
-
-                shouldMaintainRotation = true;
-                persistentYaw = startYaw;
-                persistentPitch = startPitch;
+                SmoothAimUtils.startSmoothRotation(179, -88, rotationSpeed.get(),
+                    () -> transitionToWaitingForDragon());
             }
-
-            if (aimingTicks >= totalAimTicks) {
-                persistentYaw = 179;
-                persistentPitch = -88;
-                Rotations.rotate(179, -88);
-                info("Waiting for dragon...");
-                state = SequenceState.WAITING_FOR_DRAGON;
-                tickCounter = 0;
-                return;
-            }
-
-            float progress = (float) aimingTicks / (float) totalAimTicks;
-            persistentYaw = HypixelUtils.lerpAngle(startYaw, targetYaw, progress);
-            persistentPitch = HypixelUtils.lerp(startPitch, targetPitch, progress);
-            Rotations.rotate(persistentYaw, persistentPitch);
-            aimingTicks++;
+            tickCounter++;
         } else {
-            shouldMaintainRotation = true;
-            persistentYaw = 179;
-            persistentPitch = -88;
             Rotations.rotate(179, -88);
-
             if (tickCounter > 10) {
-                info("Waiting for dragon...");
-                state = SequenceState.WAITING_FOR_DRAGON;
-                tickCounter = 0;
+                transitionToWaitingForDragon();
             }
+            tickCounter++;
         }
-        tickCounter++;
+    }
+
+    private void transitionToWaitingForDragon() {
+        info("Waiting for dragon...");
+        state = SequenceState.WAITING_FOR_DRAGON;
+        tickCounter = 0;
     }
 
     private void handleWaitingForDragon() {
@@ -764,11 +644,10 @@ public class DragonAssistant extends Module {
         InvUtils.swap(weaponSlot.get() - 1, false);
         info("Swapped to weapon slot " + weaponSlot.get());
         state = SequenceState.HOLDING_CHIMERA;
-        isHoldingChimera = true;
     }
 
     private void handleHoldingChimera() {
-        // Keep holding until dragon down
+        // Waiting for dragon down message
     }
 
     private void handleThrowingRemnants() {
@@ -796,6 +675,10 @@ public class DragonAssistant extends Module {
             ChatUtils.sendPlayerMsg("/is");
             toggle();
         }
+    }
+
+    private int getRotationTicks() {
+        return smoothAim.get() ? rotationSpeed.get() : 10;
     }
 
     // Enums
@@ -835,10 +718,9 @@ public class DragonAssistant extends Module {
         IDLE, WAITING_FOR_LEADER, WARPING_TO_END, VERIFYING_LOCATION,
         TELEPORTING_SEQUENCE, OPENING_INVENTORY, CHECKING_INVENTORY,
         MOVING_EYES_TO_HOTBAR, GETTING_EYES_STASH, GETTING_EYES_BZ_INSTA,
-        GETTING_EYES_BZ_ORDER, PLACING_EYES, AIMING_AT_PORTAL,
-        PATHING_TO_SHOOTING_POS, AIMING, WAITING_FOR_DRAGON,
-        SHOOTING_DRAGON, SWAPPING_TO_CHIMERA, HOLDING_CHIMERA,
-        THROWING_REMNANTS, WAITING_FOR_DRAGON_DOWN
+        GETTING_EYES_BZ_ORDER, PLACING_EYES, PATHING_TO_SHOOTING_POS,
+        AIMING, WAITING_FOR_DRAGON, SHOOTING_DRAGON, SWAPPING_TO_CHIMERA,
+        HOLDING_CHIMERA, THROWING_REMNANTS, WAITING_FOR_DRAGON_DOWN
     }
 
     public static class TeleportLocationData {
@@ -848,9 +730,6 @@ public class DragonAssistant extends Module {
             this.name = name; this.x = x; this.y = y; this.z = z;
         }
     }
-
-    // CONTINUES IN PART 5 (LocationManagerScreen)...
-    // CONTINUED FROM PART 4...
 
     // LocationManagerScreen inner class
     private static class LocationManagerScreen extends net.minecraft.client.gui.screen.Screen {
@@ -1034,8 +913,3 @@ public class DragonAssistant extends Module {
         }
     }
 }
-
-
-
-
-
