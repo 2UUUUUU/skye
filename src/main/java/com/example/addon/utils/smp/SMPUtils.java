@@ -18,6 +18,7 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.world.RaycastContext;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -93,6 +94,43 @@ public class SMPUtils {
         }
 
         return nearestSpawner;
+    }
+
+    public static int countSpawnersInRange(int range) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || mc.world == null) return 0;
+
+        BlockPos playerPos = mc.player.getBlockPos();
+        int count = 0;
+
+        for (BlockPos pos : BlockPos.iterate(
+            playerPos.add(-range, -range, -range),
+            playerPos.add(range, range, range))) {
+
+            if (mc.world.getBlockState(pos).getBlock() == Blocks.SPAWNER) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    public static boolean clickDropperInSpawner(GenericContainerScreenHandler container, Module module) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.player == null || mc.interactionManager == null) return false;
+
+        // Search for dropper item in spawner GUI
+        for (int i = 0; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (!stack.isEmpty() && stack.getItem() == Items.DROPPER) {
+                module.info("Found dropper in slot " + i + ", clicking...");
+                mc.interactionManager.clickSlot(container.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+                return true;
+            }
+        }
+
+        module.warning("Dropper item not found in spawner GUI!");
+        return false;
     }
 
     // ==================== CHEST OPERATIONS ====================
@@ -199,6 +237,9 @@ public class SMPUtils {
     public static void stopBreaking() {
         MinecraftClient mc = MinecraftClient.getInstance();
         KeyBinding.setKeyPressed(mc.options.attackKey.getDefaultKey(), false);
+        if (mc.interactionManager != null) {
+            mc.interactionManager.cancelBlockBreaking();
+        }
     }
 
     public static void interactWithBlock(BlockPos pos) {
@@ -215,6 +256,52 @@ public class SMPUtils {
                 false
             )
         );
+    }
+
+    public static void interactWithBlockRaytraced(BlockPos pos) {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        if (mc.interactionManager == null || mc.player == null || mc.world == null) return;
+
+        // Get player eye position
+        Vec3d eyePos = mc.player.getEyePos();
+        Vec3d targetPos = Vec3d.ofCenter(pos);
+
+        // Calculate direction vector
+        Vec3d direction = targetPos.subtract(eyePos).normalize();
+
+        // Perform raycast to find exact hit position
+        Vec3d rayEnd = eyePos.add(direction.multiply(6.0)); // Max reach distance
+
+        BlockHitResult hitResult = mc.world.raycast(
+            new RaycastContext(
+                eyePos,
+                rayEnd,
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE,
+                mc.player
+            )
+        );
+
+        // Verify we hit the target block
+        if (hitResult != null && hitResult.getBlockPos().equals(pos)) {
+            mc.interactionManager.interactBlock(
+                mc.player,
+                Hand.MAIN_HAND,
+                hitResult
+            );
+        } else {
+            // Fallback to center position if raycast missed
+            mc.interactionManager.interactBlock(
+                mc.player,
+                Hand.MAIN_HAND,
+                new BlockHitResult(
+                    targetPos,
+                    Direction.UP,
+                    pos,
+                    false
+                )
+            );
+        }
     }
 
     // ==================== SNEAKING CONTROL ====================

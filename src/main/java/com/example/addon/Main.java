@@ -28,6 +28,7 @@ public class Main extends MeteorAddon {
         Modules.get().add(new ModuleExample());
         Modules.get().add(new SpawnerProtect());
         Modules.get().add(new AutoSpawnerSell());
+        Modules.get().add(new SpawnerDropper()); // Added SpawnerDropper
         Modules.get().add(new HypixelExample());
         Modules.get().add(new DragonAssistant());
         Modules.get().add(new EtherwarpTest());
