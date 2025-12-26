@@ -25,10 +25,10 @@ public class Main extends MeteorAddon {
         LOG.info("Initializing Skye");
 
         // Modules
-        Modules.get().add(new ModuleExample());
+        Modules.get().add(new AutoCrafting());
         Modules.get().add(new SpawnerProtect());
         Modules.get().add(new AutoSpawnerSell());
-        Modules.get().add(new SpawnerDropper()); // Added SpawnerDropper
+        Modules.get().add(new SpawnerDropper());
         Modules.get().add(new HypixelExample());
         Modules.get().add(new DragonAssistant());
         Modules.get().add(new EtherwarpTest());

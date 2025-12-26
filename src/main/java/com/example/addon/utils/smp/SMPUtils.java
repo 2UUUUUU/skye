@@ -6,6 +6,7 @@ import meteordevelopment.meteorclient.systems.modules.misc.AutoReconnect;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import net.minecraft.block.Blocks;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.player.PlayerEntity;
@@ -181,6 +182,36 @@ public class SMPUtils {
         }
 
         return nearestChest;
+    }
+
+    /**
+     * Verifies if a chest menu matches the Orders menu by checking the title.
+     * Handles Unicode small caps used in server GUIs.
+     *
+     * @param screen The GenericContainerScreen to check
+     * @return true if this is the Orders menu (contains "Page" and starts with O and has a number)
+     */
+    public static boolean isOrdersMenu(GenericContainerScreen screen) {
+        if (screen == null) return false;
+
+        String title = screen.getTitle().getString();
+
+        // Check for "Page" which is in regular characters
+        // The orders menu will have "(Page X)" in the title
+        boolean hasPage = title.contains("Page") || title.contains("page");
+
+        // Check if it starts with O or ᴏ (Unicode small cap)
+        boolean startsWithO = false;
+        if (title.length() > 0) {
+            char firstChar = title.charAt(0);
+            startsWithO = (firstChar == 'O' || firstChar == 'o' || firstChar == 'ᴏ' || firstChar == 'ᴑ');
+        }
+
+        // Also check if title contains a number (from "Page 1", "Page 2", etc.)
+        boolean hasNumber = title.matches(".*\\d+.*");
+
+        // If it has "Page" and starts with an O character and has a number, it's the orders menu
+        return hasPage && startsWithO && hasNumber;
     }
 
     // ==================== MOVEMENT & ROTATION ====================
