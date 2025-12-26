@@ -1,3 +1,0 @@
-[submodule "meteorclient"]
-	path = meteorclient
-	url = https://github.com/MeteorDevelopment/meteor-client.git
