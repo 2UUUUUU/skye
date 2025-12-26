@@ -56,7 +56,7 @@ public class MixinPlugin implements IMixinConfigPlugin {
 
             mixinTransformerField.set(delegate, mixinTransformer);
         } catch (NoSuchFieldException | IllegalAccessException e) {
-            MeteorClient.LOG.error("Error loading the mixin plugin", e);
+            e.printStackTrace();
         }
 
         isIndigoPresent = FabricLoader.getInstance().isModLoaded("fabric-renderer-indigo");

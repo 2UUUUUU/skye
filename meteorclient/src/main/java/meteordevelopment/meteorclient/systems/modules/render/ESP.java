@@ -355,10 +355,6 @@ public class ESP extends Module {
         return !EntityUtils.isInRenderDistance(entity);
     }
 
-    public boolean shouldSkip(EntityType<?> entityType) {
-        return !entities.get().contains(entityType);
-    }
-
     public Color getColor(Entity entity) {
         Color color;
         double alpha = 1;

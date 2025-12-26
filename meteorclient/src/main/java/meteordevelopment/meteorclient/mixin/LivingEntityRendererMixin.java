@@ -16,7 +16,6 @@ import meteordevelopment.meteorclient.systems.modules.render.NoRender;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import net.minecraft.client.model.Model;
 import net.minecraft.client.render.RenderLayer;
-import net.minecraft.client.render.RenderLayers;
 import net.minecraft.client.render.command.ModelCommandRenderer;
 import net.minecraft.client.render.command.OrderedRenderCommandQueue;
 import net.minecraft.client.render.entity.LivingEntityRenderer;
@@ -87,7 +86,7 @@ public abstract class LivingEntityRendererMixin<T extends LivingEntity, S extend
         if (chams.ignoreSelf.get() && player == mc.player)
             return original;
 
-        return RenderLayers.itemEntityTranslucentCull(Chams.BLANK);
+        return RenderLayer.getItemEntityTranslucentCull(Chams.BLANK);
     }
 
     // Chams - Through walls

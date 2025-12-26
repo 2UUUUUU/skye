@@ -81,11 +81,6 @@ public class MeshBuilderVertexConsumerProvider implements IVertexConsumerProvide
         }
 
         @Override
-        public VertexConsumer color(int argb) {
-            return this;
-        }
-
-        @Override
         public VertexConsumer texture(float u, float v) {
             return this;
         }
@@ -103,11 +98,6 @@ public class MeshBuilderVertexConsumerProvider implements IVertexConsumerProvide
         @Override
         public VertexConsumer normal(float x, float y, float z) {
             return null;
-        }
-
-        @Override
-        public VertexConsumer lineWidth(float width) {
-            return this;
         }
 
         public void fixedColor(int red, int green, int blue, int alpha) {

@@ -7,5 +7,12 @@ package meteordevelopment.meteorclient.systems.waypoints.events;
 
 import meteordevelopment.meteorclient.systems.waypoints.Waypoint;
 
-public record WaypointAddedEvent(Waypoint waypoint) {
+@Deprecated()
+public class WaypointAddedEvent {
+
+    public final Waypoint waypoint;
+
+    public WaypointAddedEvent(Waypoint waypoint) {
+        this.waypoint = waypoint;
+    }
 }

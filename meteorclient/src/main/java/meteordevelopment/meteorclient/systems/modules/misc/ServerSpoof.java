@@ -23,7 +23,7 @@ import net.minecraft.text.MutableText;
 import net.minecraft.text.Text;
 import net.minecraft.util.Formatting;
 import net.minecraft.util.Identifier;
-import org.apache.commons.lang3.Strings;
+import org.apache.commons.lang3.StringUtils;
 
 import java.net.MalformedURLException;
 import java.net.URI;
@@ -89,7 +89,7 @@ public class ServerSpoof extends Module {
 
             if (blockChannels.get()) {
                 for (String channel : channels.get()) {
-                    if (Strings.CI.contains(id.toString(), channel)) {
+                    if (StringUtils.containsIgnoreCase(id.toString(), channel)) {
                         event.cancel();
                         return;
                     }

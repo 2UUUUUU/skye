@@ -10,7 +10,6 @@ import meteordevelopment.meteorclient.gui.renderer.packer.TextureRegion;
 import meteordevelopment.meteorclient.utils.PreInit;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.gl.GpuSampler;
 
 public class Renderer2D {
     public static Renderer2D COLOR;
@@ -49,17 +48,17 @@ public class Renderer2D {
     }
 
     public void render() {
-        render(null, null, null);
+        render(null, null);
     }
 
-    public void render(GpuTextureView textureView, GpuSampler sampler) {
+    public void render(GpuTextureView textureView) {
         if (!textured)
             throw new IllegalStateException("Tried to render with a texture with a non-textured Renderer2D");
 
-        render("u_Texture", textureView, sampler);
+        render("u_Texture", textureView);
     }
 
-    public void render(String samplerName, GpuTextureView samplerView, GpuSampler sampler) {
+    public void render(String samplerName, GpuTextureView samplerView) {
         if (lines.isBuilding()) lines.end();
         if (triangles.isBuilding()) triangles.end();
 
@@ -73,7 +72,7 @@ public class Renderer2D {
             .attachments(MinecraftClient.getInstance().getFramebuffer())
             .pipeline(textured ? MeteorRenderPipelines.UI_TEXTURED : MeteorRenderPipelines.UI_COLORED)
             .mesh(triangles)
-            .sampler(samplerName, samplerView, sampler)
+            .sampler(samplerName, samplerView)
             .end();
     }
 

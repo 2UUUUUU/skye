@@ -59,7 +59,7 @@ public class EntityUtils {
             type == EntityType.LLAMA ||
             type == EntityType.TRADER_LLAMA ||
             type == EntityType.CAMEL ||
-            type == EntityType.CAMEL_HUSK ||
+//            type == EntityType.CAMEL_HUSK || todo 1.21.11
             type == EntityType.MINECART ||
             type == EntityType.OAK_BOAT ||
             type == EntityType.SPRUCE_BOAT ||
@@ -81,8 +81,8 @@ public class EntityUtils {
             type == EntityType.PALE_OAK_CHEST_BOAT ||
             type == EntityType.SPRUCE_CHEST_BOAT ||
             type == EntityType.BAMBOO_CHEST_RAFT ||
-            type == EntityType.NAUTILUS ||
-            type == EntityType.ZOMBIE_NAUTILUS ||
+//            type == EntityType.NAUTILUS ||
+//            type == EntityType.ZOMBIE_NAUTILUS ||
             type == EntityType.HAPPY_GHAST;
     }
 
@@ -146,8 +146,8 @@ public class EntityUtils {
     }
 
     public static boolean isInRenderDistance(double posX, double posZ) {
-        double x = Math.abs(mc.gameRenderer.getCamera().getCameraPos().x - posX);
-        double z = Math.abs(mc.gameRenderer.getCamera().getCameraPos().z - posZ);
+        double x = Math.abs(mc.gameRenderer.getCamera().getPos().x - posX);
+        double z = Math.abs(mc.gameRenderer.getCamera().getPos().z - posZ);
         double d = (mc.options.getViewDistance().getValue() + 1) * 16;
 
         return x < d && z < d;

@@ -5,7 +5,6 @@
 
 package meteordevelopment.meteorclient.utils.tooltip;
 
-import meteordevelopment.meteorclient.mixin.DrawContextAccessor;
 import meteordevelopment.meteorclient.utils.render.CustomBannerGuiElementRenderState;
 import net.minecraft.client.font.TextRenderer;
 import net.minecraft.client.gui.DrawContext;
@@ -60,13 +59,11 @@ public class BannerTooltipComponent implements MeteorTooltipData, TooltipCompone
     public void drawItems(TextRenderer textRenderer, int x, int y, int width, int height, DrawContext context) {
         var centerX = width / 2 - getWidth(null) / 2;
 
-        DrawContextAccessor contextAccessor = (DrawContextAccessor) context;
-
-        contextAccessor.getState().addSpecialElement(new CustomBannerGuiElementRenderState(
+        context.state.addSpecialElement(new CustomBannerGuiElementRenderState(
             bannerFlag, color, patterns,
             centerX + x, y,
             centerX + x + getWidth(null), y + getHeight(null),
-            contextAccessor.getScissorStack().peekLast(),
+            context.scissorStack.peekLast(),
             16 * 2
         ));
     }

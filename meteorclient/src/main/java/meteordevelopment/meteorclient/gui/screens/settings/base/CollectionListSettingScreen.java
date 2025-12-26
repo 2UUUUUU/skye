@@ -13,7 +13,6 @@ import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WPressable;
 import meteordevelopment.meteorclient.settings.Setting;
-import meteordevelopment.meteorclient.systems.config.Config;
 
 import java.util.Collection;
 import java.util.function.Consumer;
@@ -61,9 +60,7 @@ public abstract class CollectionListSettingScreen<T> extends WindowScreen {
             if (v != null) addValue(v);
         });
 
-        if (Config.get().syncListSettingWidths.get() || !left.cells.isEmpty()) {
-            table.add(theme.verticalSeparator()).expandWidgetY();
-        }
+        if (!left.cells.isEmpty()) table.add(theme.verticalSeparator()).expandWidgetY();
 
         // Right (selected)
         WTable right = abc(collection, false, t -> {
@@ -79,7 +76,6 @@ public abstract class CollectionListSettingScreen<T> extends WindowScreen {
     private WTable abc(Iterable<T> iterable, boolean isLeft, Consumer<T> buttonAction) {
         // Create
         Cell<WTable> cell = this.table.add(theme.table()).top();
-        if (Config.get().syncListSettingWidths.get()) cell.group("sync-width");
         WTable table = cell.widget();
 
         // Sort

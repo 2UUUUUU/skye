@@ -17,6 +17,7 @@ import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.misc.CursorStyle;
 import meteordevelopment.meteorclient.utils.misc.input.Input;
+import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -303,8 +304,8 @@ public abstract class WidgetScreen extends Screen {
     protected void onRenderBefore(DrawContext drawContext, float delta) {}
 
     @Override
-    public void resize(int width, int height) {
-        super.resize(width, height);
+    public void resize(MinecraftClient client, int width, int height) {
+        super.resize(client, width, height);
         root.invalidate();
     }
 

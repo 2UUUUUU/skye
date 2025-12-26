@@ -77,6 +77,7 @@ dependencies {
 
     val fapiVersion = libs.versions.fabric.api.get()
     modInclude(fabricApi.module("fabric-api-base", fapiVersion))
+    modInclude(fabricApi.module("fabric-resource-loader-v0", fapiVersion))
     modInclude(fabricApi.module("fabric-resource-loader-v1", fapiVersion))
 
     // Compat fixes
@@ -150,8 +151,7 @@ tasks {
             "version" to project.version,
             "build_number" to buildNumber,
             "commit" to commit,
-            "minecraft_version" to libs.versions.minecraft.get(),
-            "loader_version" to libs.versions.fabric.loader.get()
+            "minecraft_version" to libs.versions.minecraft.get()
         )
 
         inputs.properties(propertyMap)

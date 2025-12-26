@@ -44,7 +44,7 @@ public abstract class WTextBox extends WWidget {
     protected int cursor;
     protected double textStart;
 
-    protected boolean selecting, doubleClick;
+    protected boolean selecting;
     protected int selectionStart, selectionEnd;
     private int preSelectionCursor;
 
@@ -120,6 +120,16 @@ public abstract class WTextBox extends WWidget {
                 }
             }
             else if (click.button() == GLFW_MOUSE_BUTTON_LEFT) {
+                if (doubled) {
+                    selecting = false;
+
+                    cursor = text.length();
+                    selectionStart = 0;
+                    selectionEnd = cursor;
+
+                    return true;
+                }
+
                 selecting = true;
 
                 double overflowWidth = getOverflowWidthForRender();
@@ -137,16 +147,6 @@ public abstract class WTextBox extends WWidget {
                         smallestDifference = difference;
                         cursor = i;
                     }
-                }
-
-                if (doubled && cursor == preSelectionCursor) {
-                    doubleClick = true;
-                    resetSelection();
-
-                    selectionStart = (cursor - countToNextSpace(true));
-                    selectionEnd = cursor = (cursor + countToNextSpace(false));
-
-                    return true;
                 }
 
                 preSelectionCursor = cursor;
@@ -173,53 +173,22 @@ public abstract class WTextBox extends WWidget {
 
         double smallestDifference = Double.MAX_VALUE;
 
-        int best = 0;
         for (int i = 0; i < textWidths.size(); i++) {
             double difference = Math.abs(textWidths.getDouble(i) + pad - relativeMouseX);
 
             if (difference < smallestDifference) {
-                best = i;
                 smallestDifference = difference;
-                if (!doubleClick) {
-                    if (i < preSelectionCursor) {
-                        selectionStart = i;
-                        cursor = i;
-                    } else if (i > preSelectionCursor) {
-                        selectionEnd = i;
-                        cursor = i;
-                    } else {
-                        cursor = preSelectionCursor;
-                        resetSelection();
-                    }
+                if (i < preSelectionCursor) {
+                    selectionStart = i;
+                    cursor = i;
                 }
-            }
-        }
-
-        // double click selection will select by whole words
-        if (doubleClick) {
-            if (best < selectionStart) {
-                selectionStart = best - countToNextSpace(true, best);
-                cursor = selectionStart;
-            }
-            else if (best > selectionEnd) {
-                selectionEnd = best + countToNextSpace(false, best);
-                cursor = selectionEnd;
-            }
-            else {
-                if (cursor == selectionStart) {
-                    int nextRight = countToNextSpace(false);
-                    if (best > cursor + nextRight) {
-                        selectionStart = cursor = cursor + nextRight + 1;
-                        if (selectionStart <= preSelectionCursor && selectionStart + countToNextSpace(false) >= preSelectionCursor) {
-                            cursor = selectionEnd;
-                        }
-                    }
+                else if (i > preSelectionCursor) {
+                    selectionEnd = i;
+                    cursor = i;
                 }
-                else if (cursor == selectionEnd) {
-                    int nextLeft = countToNextSpace(true);
-                    if (best < cursor - nextLeft) {
-                        selectionEnd = cursor = cursor - nextLeft - 1;
-                    }
+                else {
+                    cursor = preSelectionCursor;
+                    resetSelection();
                 }
             }
         }
@@ -228,7 +197,6 @@ public abstract class WTextBox extends WWidget {
     @Override
     public boolean onMouseReleased(Click click) {
         selecting = false;
-        doubleClick = false;
 
         if (selectionStart < preSelectionCursor && preSelectionCursor == selectionEnd) {
             cursor = selectionStart;
@@ -383,32 +351,24 @@ public abstract class WTextBox extends WWidget {
         }
         else if (input.key() == GLFW_KEY_LEFT) {
             if (cursor > 0) {
-                // sets the cursor to just after the next leftmost space
                 if (input.modifiers() == (SystemUtils.IS_OS_WINDOWS ? GLFW_MOD_CONTROL : GLFW_MOD_ALT)) {
                     cursor -= countToNextSpace(true);
                     resetSelection();
                 }
-                // sets the cursor to the beginning of the text box
                 else if (input.modifiers() == (SystemUtils.IS_OS_WINDOWS ? GLFW_MOD_ALT : MacWindowUtil.IS_MAC ? GLFW_MOD_SUPER : GLFW_MOD_CONTROL)) {
                     cursor = 0;
                     resetSelection();
                 }
-                // sets the selection to just after the next leftmost space
                 else if (altShift) {
                     if (cursor == selectionEnd && cursor != selectionStart) {
                         cursor -= countToNextSpace(true);
-                        if (cursor >= selectionStart) selectionEnd = cursor;
-                        else {
-                            selectionEnd = selectionStart;
-                            selectionStart = cursor;
-                        }
+                        selectionEnd = cursor;
                     }
                     else {
                         cursor -= countToNextSpace(true);
                         selectionStart = cursor;
                     }
                 }
-                // sets the selection to the beginning of the text box
                 else if (controlShift) {
                     if (cursor == selectionEnd && cursor != selectionStart) {
                         selectionEnd = selectionStart;
@@ -417,7 +377,6 @@ public abstract class WTextBox extends WWidget {
 
                     cursor = 0;
                 }
-                // moves the selection one character to the left
                 else if (shift) {
                     if (cursor == selectionEnd && cursor != selectionStart) {
                         selectionEnd = cursor - 1;
@@ -428,7 +387,6 @@ public abstract class WTextBox extends WWidget {
 
                     cursor--;
                 }
-                // moves the cursor one character to the left
                 else {
                     if (cursor == selectionEnd && cursor != selectionStart) {
                         cursor = selectionStart;
@@ -452,32 +410,24 @@ public abstract class WTextBox extends WWidget {
         }
         else if (input.key() == GLFW_KEY_RIGHT) {
             if (cursor < text.length()) {
-                // sets the cursor to just before the next rightmost space
                 if (input.modifiers() == (SystemUtils.IS_OS_WINDOWS ? GLFW_MOD_CONTROL : GLFW_MOD_ALT)) {
                     cursor += countToNextSpace(false);
                     resetSelection();
                 }
-                // sets the cursor to the end of the text box
                 else if (input.modifiers() == (SystemUtils.IS_OS_WINDOWS ? GLFW_MOD_ALT : MacWindowUtil.IS_MAC ? GLFW_MOD_SUPER : GLFW_MOD_CONTROL)) {
                     cursor = text.length();
                     resetSelection();
                 }
-                // sets the selection to just before the next rightmost space
                 else if (altShift) {
                     if (cursor == selectionStart && cursor != selectionEnd) {
                         cursor += countToNextSpace(false);
-                        if (cursor <= selectionEnd) selectionStart = cursor;
-                        else {
-                            selectionStart = selectionEnd;
-                            selectionEnd = cursor;
-                        }
+                        selectionStart = cursor;
                     }
                     else {
                         cursor += countToNextSpace(false);
                         selectionEnd = cursor;
                     }
                 }
-                // sets the selection to the end of the text box
                 else if (controlShift) {
                     if (cursor == selectionStart && cursor != selectionEnd) {
                         selectionStart = selectionEnd;
@@ -485,7 +435,6 @@ public abstract class WTextBox extends WWidget {
                     cursor = text.length();
                     selectionEnd = cursor;
                 }
-                // moves the selection one character to the right
                 else if (shift) {
                     if (cursor == selectionStart && cursor != selectionEnd) {
                         selectionStart = cursor + 1;
@@ -496,7 +445,6 @@ public abstract class WTextBox extends WWidget {
 
                     cursor++;
                 }
-                // moves the cursor one character to the right
                 else {
                     if (cursor == selectionStart && cursor != selectionEnd) {
                         cursor = selectionEnd;
@@ -618,14 +566,10 @@ public abstract class WTextBox extends WWidget {
     }
 
     private int countToNextSpace(boolean toLeft) {
-        return countToNextSpace(toLeft, cursor);
-    }
-
-    private int countToNextSpace(boolean toLeft, int startPos) {
         int count = 0;
         boolean hadNonSpace = false;
 
-        for (int i = startPos; toLeft ? i >= 0 : i < text.length(); i += toLeft ? -1 : 1) {
+        for (int i = cursor; toLeft ? i >= 0 : i < text.length(); i += toLeft ? -1 : 1) {
             int j = i;
             if (toLeft) j--;
 

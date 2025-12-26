@@ -34,7 +34,6 @@ import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.GameMode;
 import net.minecraft.world.RaycastContext;
-import net.minecraft.world.attribute.EnvironmentAttributes;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 import static meteordevelopment.meteorclient.utils.Utils.WHITE;
@@ -206,7 +205,7 @@ public class PlayerUtils {
             }
 
             // Check for beds if in nether
-            if (mc.world.getEnvironmentAttributes().getAttributeValue(EnvironmentAttributes.BED_RULE_GAMEPLAY).explodes()) {
+            if (!mc.world.getDimension().bedWorks()) {
                 for (BlockEntity blockEntity : Utils.blockEntities()) {
                     BlockPos bp = blockEntity.getPos();
                     Vec3d pos = new Vec3d(bp.getX(), bp.getY(), bp.getZ());
@@ -297,7 +296,7 @@ public class PlayerUtils {
     }
 
     public static double squaredDistanceToCamera(double x, double y, double z) {
-        Vec3d cameraPos = mc.gameRenderer.getCamera().getCameraPos();
+        Vec3d cameraPos = mc.gameRenderer.getCamera().getPos();
         return squaredDistance(cameraPos.x, cameraPos.y, cameraPos.z, x, y, z);
     }
 

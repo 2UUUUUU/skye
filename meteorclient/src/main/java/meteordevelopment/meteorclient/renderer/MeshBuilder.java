@@ -64,7 +64,7 @@ public class MeshBuilder {
         building = true;
 
         if (Utils.rendering3D) {
-            Vec3d camera = mc.gameRenderer.getCamera().getCameraPos();
+            Vec3d camera = mc.gameRenderer.getCamera().getPos();
 
             cameraX = camera.x;
             cameraZ = camera.z;
