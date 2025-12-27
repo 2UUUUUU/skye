@@ -8,7 +8,7 @@
     "Edward"
   ],
   "contact": {
-    "sources": "https://github.com/MeteorDevelopment/meteor-addon-template"
+    "sources": "https://discord.gg/x52DCyTFKH"
   },
   "icon": "assets/template/icon.png",
   "environment": "client",
@@ -21,7 +21,7 @@
     "skye.mixins.json"
   ],
   "custom": {
-    "meteor-client:color": "225,25,25",
+    "meteor-client:color": "251,129,5",
     "modmenu": {
       "parent": {
         "id": "meteor-client"

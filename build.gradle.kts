@@ -24,10 +24,13 @@ dependencies {
     minecraft(libs.minecraft)
     mappings(variantOf(libs.yarn) { classifier("v2") })
     modImplementation(libs.fabric.loader)
-
-    // Meteor
-    modImplementation(libs.meteor.client)
+    modImplementation("meteordevelopment:meteor-client:1.21.10-local")
+    include(modImplementation("meteordevelopment:meteor-client:1.21.10-local")!!)
 }
+
+
+
+
 
 tasks {
     processResources {

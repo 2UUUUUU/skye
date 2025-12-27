@@ -12,6 +12,7 @@ import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.meteorclient.events.world.PlaySoundEvent;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.player.PlayerEntity;
@@ -93,6 +94,12 @@ public class AutoSpawnerSell extends Module {
         .description("Rotation speed in ticks for smooth aim")
         .defaultValue(10).min(0).max(600).sliderMax(600)
         .visible(smoothAim::get).build());
+
+    private final Setting<SilentMode> silentMode = sgGeneral.add(new EnumSetting.Builder<SilentMode>()
+        .name("silent-mode")
+        .description("Hide logs in chat")
+        .defaultValue(SilentMode.Disabled)
+        .build());
 
     // Failsafes Settings
     private final Setting<TeleportAction> onTeleport = sgFailsafes.add(new EnumSetting.Builder<TeleportAction>()
@@ -200,7 +207,7 @@ public class AutoSpawnerSell extends Module {
     // State enum
     private enum State {
         IDLE, FINDING_SPAWNER, OPENING_SPAWNER, WAITING_SPAWNER_MENU, CHECKING_SPAWNER_CONTENTS,
-        PAUSED_NOT_ENOUGH_BONES, CLICK_SLOT_50, SENDING_ORDER_COMMAND, WAITING_ORDER_MENU,
+        PAUSED_NOT_ENOUGH_BONES, CLICK_SLOT_50, CLOSING_SPAWNER_MENU, SENDING_ORDER_COMMAND, WAITING_ORDER_MENU,
         CLICK_BONE_SLOT, WAITING_DEPOSIT_MENU, DEPOSITING_BONES, CLOSING_DEPOSIT_MENU,
         WAITING_CONFIRM_MENU, CLICK_CONFIRM_SLOT, WAITING_FOR_CHAT_CONFIRMATION,
         CLOSING_FIRST_INVENTORY, CLOSING_SECOND_INVENTORY, LOOP_DELAY, RETRY_SEQUENCE,
@@ -210,7 +217,7 @@ public class AutoSpawnerSell extends Module {
         PROTECT_OPEN_CHEST, PROTECT_DEPOSIT_BONES_TO_CHEST, PROTECT_CLOSE_CHEST,
         PROTECT_RECHECK_WAIT, PROTECT_GOING_TO_SPAWNERS, PROTECT_GOING_TO_CHEST,
         PROTECT_OPENING_CHEST, PROTECT_DEPOSITING_ITEMS, PROTECT_DISCONNECTING,
-        TELEPORT_PAUSED, TELEPORT_PAUSE_FOR_TIME
+        TELEPORT_PAUSED, TELEPORT_PAUSE_FOR_TIME, WAITING_CONFIRM_SELL_MENU, CLICK_CONFIRM_SELL,  CLICK_CONFIRM_SELL_SECOND, WAIT_AFTER_SELL_CONFIRM
     }
 
     // Teleport Action Enum
@@ -224,6 +231,17 @@ public class AutoSpawnerSell extends Module {
         TeleportAction(String name) { this.name = name; }
         @Override public String toString() { return name; }
     }
+    // Silent Mode Enum
+    public enum SilentMode {
+        Disabled("Disabled"),
+        HideDebug("Hide Debug"),
+        HideAll("Hide All");
+
+        private final String name;
+        SilentMode(String name) { this.name = name; }
+        @Override public String toString() { return name; }
+    }
+
 
     // State variables
     private State currentState = State.IDLE;
@@ -234,6 +252,7 @@ public class AutoSpawnerSell extends Module {
     private boolean chatMessageReceived = false;
     private boolean waitingForChatMessage = false;
     private boolean waitingForProfitMessage = false;
+    private boolean protectSelling = false;
 
     // Spawner Protect variables
     private String detectedEntity = "";
@@ -252,8 +271,6 @@ public class AutoSpawnerSell extends Module {
     private String emergencyReason = "";
     private int transferDelayCounter = 0;
     private int lastProcessedSlot = -1;
-    private BlockPos tempBoneChest = null;
-    private int boneChestOpenAttempts = 0;
 
     // Teleport detection variables
     private Vec3d lastPosition = null;
@@ -333,25 +350,42 @@ public class AutoSpawnerSell extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
+        if (mc.currentScreen instanceof GenericContainerScreen screen) {
+            if (protectTickCounter % 20 == 0) { // Log every second
+                String title = screen.getTitle().getString();
+                var handler = screen.getScreenHandler();
+                info("=== SCREEN DEBUG ===");
+                info("Current State: " + currentState);
+                info("Screen Title: '" + title + "'");
+                info("Handler Type: " + handler.getClass().getSimpleName());
+                if (handler instanceof GenericContainerScreenHandler container) {
+                    info("Container Rows: " + container.getRows());
+                    info("Total Slots: " + container.slots.size());
+                }
+                info("===================");
+            }
+        }
+
         protectTickCounter++;
 
-        // Handle smooth aim rotation if active
+        if (smoothAim.get() && SmoothAimUtils.isRotating()) {
+            SmoothAimUtils.tickRotation();
+        }
+        protectTickCounter++;
+
         if (smoothAim.get() && SmoothAimUtils.isRotating()) {
             SmoothAimUtils.tickRotation();
         }
 
-        // PRIORITY 1: Handle teleport states first (if already in teleport mode, ONLY handle teleport - skip everything else)
         if (currentState == State.TELEPORT_PAUSED || currentState == State.TELEPORT_PAUSE_FOR_TIME) {
             handleTeleportStates();
-            return; // Stop ALL processing - no entity checks, no sound checks, nothing
+            return;
         }
 
-        // PRIORITY 2: Check for teleport detection (only if NOT already in a teleport state)
         if (checkTeleportDetection()) {
-            return; // Stop all other processing if teleport is detected - entity check will be skipped next tick
+            return;
         }
 
-        // PRIORITY 3: Spawner Protect checks (only run if not in teleport mode)
         if (enableSpawnerProtect.get() && !isTeleportMode() && checkForEntities()) {
             return;
         }
@@ -374,12 +408,10 @@ public class AutoSpawnerSell extends Module {
     private void onPlaySound(PlaySoundEvent event) {
         if (!enableSpawnerProtect.get() || mc.player == null || mc.world == null) return;
 
-        // CRITICAL: Skip ALL sound detection if in any teleport or protect mode
         if (isTeleportMode() || isProtectMode()) return;
 
         String soundId = event.sound.getId().toString();
 
-        // Check for block break sounds
         if (triggerOnBrokenBlock.get() && SMPUtils.isBlockBreakSound(soundId)) {
             detectedEntity = "Block Break Sound";
             detectionTime = System.currentTimeMillis();
@@ -391,7 +423,6 @@ public class AutoSpawnerSell extends Module {
             info("Block break detected! Starting protection sequence...");
         }
 
-        // Check for block place sounds
         if (triggerOnPlacedBlock.get() && SMPUtils.isBlockPlaceSound(soundId)) {
             detectedEntity = "Block Place Sound";
             detectionTime = System.currentTimeMillis();
@@ -407,7 +438,6 @@ public class AutoSpawnerSell extends Module {
     private boolean checkTeleportDetection() {
         if (mc.player == null) return false;
 
-        // Initialize last position if null
         if (lastPosition == null) {
             lastPosition = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
             return false;
@@ -416,17 +446,12 @@ public class AutoSpawnerSell extends Module {
         Vec3d currentPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         double distance = currentPos.distanceTo(lastPosition);
 
-        // Check if distance threshold is met
         if (distance >= teleportDistance.get()) {
-            // Teleport detected!
             warning("Teleport detected! Distance: " + String.format("%.0f", distance) + " blocks");
 
-            // CRITICAL: Set state IMMEDIATELY before handleTeleportDetected
-            // This ensures isTeleportMode() returns true on the SAME tick
             State previousState = currentState;
             handleTeleportDetected();
 
-            // Update last position to current to prevent re-detection
             lastPosition = currentPos;
 
             info("Current state after teleport: " + currentState);
@@ -435,7 +460,6 @@ public class AutoSpawnerSell extends Module {
             return true;
         }
 
-        // Update last position for next tick
         lastPosition = currentPos;
         return false;
     }
@@ -459,7 +483,6 @@ public class AutoSpawnerSell extends Module {
                 break;
 
             case PauseUntilReturn:
-                // Parse home position from settings
                 Vec3d homePos = parseHomePosition();
                 if (homePos == null) {
                     error("Invalid home position format! Expected format: X Y Z (e.g., 100 64 200)");
@@ -496,7 +519,6 @@ public class AutoSpawnerSell extends Module {
 
     private void handleTeleportStates() {
         if (currentState == State.TELEPORT_PAUSE_FOR_TIME) {
-            // Simple timer-based pause
             if (teleportWaitCounter > 0) {
                 teleportWaitCounter--;
                 if (teleportWaitCounter % 100 == 0 && teleportWaitCounter > 0) {
@@ -516,7 +538,6 @@ public class AutoSpawnerSell extends Module {
         if (mc.player == null) return;
 
         if (currentState == State.TELEPORT_PAUSED) {
-            // Parse home position from settings
             Vec3d homePos = parseHomePosition();
             if (homePos == null) {
                 error("Invalid home position! Disabling module.");
@@ -527,7 +548,6 @@ public class AutoSpawnerSell extends Module {
             Vec3d currentPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
             double distanceFromHome = currentPos.distanceTo(homePos);
 
-            // Check if we're back within the teleport distance threshold of HOME
             if (distanceFromHome < teleportDistance.get()) {
                 info("Return detected - Back at home position (distance: " + String.format("%.1f", distanceFromHome) + " blocks)");
                 info("Resuming sequence...");
@@ -540,11 +560,6 @@ public class AutoSpawnerSell extends Module {
         }
     }
 
-    /**
-     * Parse home position from string setting
-     * Expected format: "X Y Z" (e.g., "100 64 200")
-     * @return Vec3d of home position, or null if invalid format
-     */
     private Vec3d parseHomePosition() {
         String posStr = homePosition.get().trim();
         if (posStr.isEmpty()) {
@@ -592,14 +607,12 @@ public class AutoSpawnerSell extends Module {
         emergencyReason = "";
         transferDelayCounter = 0;
         lastProcessedSlot = -1;
-        tempBoneChest = null;
-        boneChestOpenAttempts = 0;
         teleportWaitCounter = 0;
         stateBeforeTeleport = State.IDLE;
         teleportDetected = false;
         positionBeforeTeleport = null;
+        protectSelling = false;
     }
-
 
     private void cleanupControls() {
         SMPUtils.stopBreaking();
@@ -619,13 +632,18 @@ public class AutoSpawnerSell extends Module {
 
     private boolean checkForEntities() {
         if (isTeleportMode()) {
-            if (protectTickCounter % 20 == 0) { // Log every second
+            if (protectTickCounter % 20 == 0) {
                 info("Skipping entity check - in teleport mode (state: " + currentState + ")");
             }
             return false;
         }
 
         if (isProtectMode()) return false;
+
+        // Skip entity check if we're selling during protect sequence
+        if (protectSelling) {
+            return false;
+        }
 
         if (targetEntities.get().isEmpty()) return false;
 
@@ -652,12 +670,30 @@ public class AutoSpawnerSell extends Module {
 
             mc.player.closeHandledScreen();
             currentState = State.PROTECT_DETECTION_WAIT;
-            delayCounter = 20;
+            delayCounter = 3 + (int)(Math.random() * 8); // Random 3-10 ticks
             info("Entity detected! Starting protection sequence...");
 
             return true;
         }
         return false;
+    }
+
+    private boolean isInDeliverySequence(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        String title = screen.getTitle().getString().toLowerCase();
+
+        // Check for either "deliver items" or "confirm delivery" menus
+        boolean isDeliverItems = title.contains("deliver") && title.contains("items");
+        boolean isConfirmDelivery = title.contains("confirm") && title.contains("delivery");
+
+        return isDeliverItems || isConfirmDelivery;
     }
 
     private void sendWebhookNotification() {
@@ -673,12 +709,111 @@ public class AutoSpawnerSell extends Module {
             messageContent,
             detectedEntity,
             detectionTime,
-            false, // No emergency disconnect
+            false,
             emergencyReason,
             spawnersMinedSuccessfully,
             itemsDepositedSuccessfully,
             this
         );
+    }
+
+    private boolean isSpawnerMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        String title = screen.getTitle().getString();
+        info("Checking spawner menu - Title: '" + title + "'");
+
+        // Very lenient check - just look for key letter sequences
+        String lower = title.toLowerCase();
+
+        // Check for "skelet" or the small caps version
+        boolean hasSkeleton = lower.contains("skelet") || title.contains("ᴋᴇʟᴇᴛ");
+
+        // Check for "spawn" or "pawner" or the small caps version
+        boolean hasSpawner = lower.contains("spawn") || lower.contains("pawner") ||
+            title.contains("ᴘᴀᴡɴᴇʀ") || title.contains("ᴘᴀᴡɴ");
+
+        info("Has skeleton: " + hasSkeleton + ", Has spawner: " + hasSpawner);
+
+        return hasSkeleton && hasSpawner;
+    }
+
+    private boolean isOrdersMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        return SMPUtils.isOrdersMenu(screen);
+    }
+
+    private boolean isDepositMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        String title = screen.getTitle().getString();
+        info("Checking deposit menu - Title: '" + title + "'"); // DEBUG
+
+        String lowerTitle = title.toLowerCase();
+        boolean result = lowerTitle.contains("deliver") && lowerTitle.contains("items");
+        info("Deposit menu check result: " + result); // DEBUG
+
+        return result;
+    }
+
+    private boolean isConfirmMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        String title = screen.getTitle().getString().toLowerCase();
+
+        // Check for key words that identify the confirm menu
+        return title.contains("confirm") && title.contains("delivery");
+    }
+
+    private boolean isConfirmSellMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            return false;
+        }
+
+        String title = screen.getTitle().getString();
+        info("Checking confirm sell menu - Title: '" + title + "'");
+
+        // Use the EXACT characters from your log: ᴄᴏɴꜰɪʀᴍ ѕᴇʟʟ
+        boolean hasConfirm = title.contains("ᴄᴏɴꜰɪʀᴍ") ||
+            title.toUpperCase().contains("CONFIRM") ||
+            title.toLowerCase().contains("confirm");
+
+        boolean hasSell = title.contains("ѕᴇʟʟ") ||
+            title.toUpperCase().contains("SELL") ||
+            title.toLowerCase().contains("sell");
+
+        info("Has confirm: " + hasConfirm + ", Has sell: " + hasSell);
+
+        return hasConfirm && hasSell;
     }
 
     private void handleState(ScreenHandler handler) {
@@ -689,7 +824,12 @@ public class AutoSpawnerSell extends Module {
             case WAITING_SPAWNER_MENU -> handleWaitingSpawnerMenu(handler);
             case CHECKING_SPAWNER_CONTENTS -> handleCheckingSpawnerContents(handler);
             case PAUSED_NOT_ENOUGH_BONES -> handlePausedNotEnoughBones();
+            case WAITING_CONFIRM_SELL_MENU -> handleWaitingConfirmSellMenu(handler);
+            case CLICK_CONFIRM_SELL -> handleClickConfirmSell(handler);
+            case CLICK_CONFIRM_SELL_SECOND -> handleClickConfirmSellSecond(handler);
+            case WAIT_AFTER_SELL_CONFIRM -> handleWaitAfterSellConfirm();
             case CLICK_SLOT_50 -> handleClickSlot50(handler);
+            case CLOSING_SPAWNER_MENU -> handleClosingSpawnerMenu();
             case SENDING_ORDER_COMMAND -> handleSendingOrderCommand();
             case WAITING_ORDER_MENU -> handleWaitingOrderMenu(handler);
             case CLICK_BONE_SLOT -> handleClickBoneSlot(handler);
@@ -711,11 +851,6 @@ public class AutoSpawnerSell extends Module {
             case PROTECT_INITIAL_WAIT -> handleProtectInitialWait();
             case PROTECT_OPEN_PLAYER_INVENTORY -> handleProtectOpenPlayerInventory();
             case PROTECT_CHECK_INVENTORY -> handleProtectCheckInventory();
-            case PROTECT_FIND_CHEST -> handleProtectFindChest();
-            case PROTECT_OPEN_CHEST -> handleProtectOpenChest();
-            case PROTECT_DEPOSIT_BONES_TO_CHEST -> handleProtectDepositBonesToChest(handler);
-            case PROTECT_CLOSE_CHEST -> handleProtectCloseChest();
-            case PROTECT_RECHECK_WAIT -> handleProtectRecheckWait();
             case PROTECT_GOING_TO_SPAWNERS -> handleProtectGoingToSpawners();
             case PROTECT_GOING_TO_CHEST -> handleProtectGoingToChest();
             case PROTECT_OPENING_CHEST -> handleProtectOpeningChest();
@@ -766,8 +901,8 @@ public class AutoSpawnerSell extends Module {
     private void handleWaitingSpawnerMenu(ScreenHandler handler) {
         spawnerTimeoutCounter++;
 
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
-            info("Spawner menu opened (6 rows)");
+        if (isSpawnerMenu(handler)) {
+            info("Spawner menu opened (Skeleton Spawner)");
             currentState = State.CHECKING_SPAWNER_CONTENTS;
             delayCounter = actionDelay.get();
             spawnerTimeoutCounter = 0;
@@ -792,7 +927,21 @@ public class AutoSpawnerSell extends Module {
         for (int i = 0; i < firstFiveRows; i++) {
             ItemStack stack = container.getSlot(i).getStack();
             if (stack.isEmpty() || stack.getItem() != Items.BONE) {
-                warning("Not enough bones in spawner! Pausing sequence...");
+                warning("Not enough bones in spawner! Clicking gold ingot to sell...");
+
+                // Find and click gold ingot
+                for (int j = 0; j < container.slots.size(); j++) {
+                    ItemStack slotStack = container.getSlot(j).getStack();
+                    if (slotStack.getItem() == Items.GOLD_INGOT) {
+                        info("Clicking gold ingot in slot " + j);
+                        mc.interactionManager.clickSlot(handler.syncId, j, 0, SlotActionType.PICKUP, mc.player);
+                        currentState = State.WAITING_CONFIRM_SELL_MENU;
+                        delayCounter = actionDelay.get() * 2;
+                        return;
+                    }
+                }
+
+                warning("Gold ingot not found! Pausing sequence...");
                 mc.player.closeHandledScreen();
                 currentState = State.PAUSED_NOT_ENOUGH_BONES;
 
@@ -814,6 +963,114 @@ public class AutoSpawnerSell extends Module {
         delayCounter = actionDelay.get();
     }
 
+    private void handleWaitingConfirmSellMenu(ScreenHandler handler) {
+        if (isConfirmSellMenu(handler)) {
+            info("Confirm sell menu detected");
+            currentState = State.CLICK_CONFIRM_SELL;
+            delayCounter = actionDelay.get();
+        }
+    }
+
+    private void handleClickConfirmSell(ScreenHandler handler) {
+        if (!(handler instanceof GenericContainerScreenHandler container)) {
+            currentState = State.RETRY_SEQUENCE;
+            return;
+        }
+
+        // Check if we're still in the correct screen
+        if (!(mc.currentScreen instanceof GenericContainerScreen)) {
+            warning("Screen closed before clicking!");
+            currentState = State.RETRY_SEQUENCE;
+            return;
+        }
+
+        // Find and click lime glass pane (first click)
+        for (int i = 0; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (stack.getItem() == Items.LIME_STAINED_GLASS_PANE) {
+                info("Clicking lime glass pane to confirm sell (1st click) in slot " + i);
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+
+                currentState = State.CLICK_CONFIRM_SELL_SECOND;
+                delayCounter = 5; // Increase delay to 5 ticks
+                return;
+            }
+        }
+
+        warning("Lime glass pane not found in confirm sell menu!");
+        currentState = State.RETRY_SEQUENCE;
+    }
+
+    private void handleClickConfirmSellSecond(ScreenHandler handler) {
+        if (!(handler instanceof GenericContainerScreenHandler container)) {
+            warning("Not in container screen for second click!");
+            currentState = State.RETRY_SEQUENCE;
+            return;
+        }
+
+        // Check if we're still in the correct screen
+        if (!(mc.currentScreen instanceof GenericContainerScreen)) {
+            warning("Screen closed before second click!");
+            currentState = State.RETRY_SEQUENCE;
+            return;
+        }
+
+        // Find and click lime glass pane (second click)
+        for (int i = 0; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (stack.getItem() == Items.LIME_STAINED_GLASS_PANE) {
+                info("Clicking lime glass pane to confirm sell (2nd click) in slot " + i);
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+
+                // Wait a bit for the clicks to register, then go to pause state
+                currentState = State.WAIT_AFTER_SELL_CONFIRM;
+                delayCounter = 10; // Just wait for clicks to register
+                return;
+            }
+        }
+
+        warning("Lime glass pane not found in confirm sell menu (second click)!");
+        currentState = State.RETRY_SEQUENCE;
+    }
+
+    private void handleWaitAfterSellConfirm() {
+        info("Clicks registered, now applying pause settings...");
+
+        // Close any open screens
+        if (mc.currentScreen != null) {
+            mc.player.closeHandledScreen();
+        }
+
+        currentState = State.PAUSED_NOT_ENOUGH_BONES;
+
+        // Now apply the actual pause sequence delay
+        if (pauseSequence.get()) {
+            int minDelay = pauseMinimumDelay.get();
+            int maxDelay = pauseMaximumDelay.get();
+            int randomDelay = minDelay + (int)(Math.random() * (maxDelay - minDelay + 1));
+            delayCounter = randomDelay;
+
+            // Format the pause message with colors
+            logPauseMessage(randomDelay, minDelay, maxDelay);
+        } else {
+            delayCounter = 200;
+            info("Pause sequence disabled, using default 200 tick delay");
+        }
+    }
+
+    private void logPauseMessage(int ticks, int minTicks, int maxTicks) {
+        // Convert ticks to minutes (20 ticks = 1 second, 1200 ticks = 1 minute)
+        double minutes = ticks / 1200.0;
+        String formattedMinutes = String.format("%.2f", minutes).replace('.', ',');
+
+        // Build colored message using Minecraft's formatting codes
+        String message = "§6Pausing for §d" + formattedMinutes + " minutes §8(between §7"
+            + minTicks + " §8and §7" + maxTicks + " ticks§8)";
+
+        // Always show pause messages, even in HideAll mode
+        ChatUtils.info(message);
+    }
+
     private void handlePausedNotEnoughBones() {
         info("Pause complete, restarting sequence from spawner");
         currentState = State.FINDING_SPAWNER;
@@ -828,22 +1085,36 @@ public class AutoSpawnerSell extends Module {
 
         info("Clicking slot 50 in spawner menu");
         mc.interactionManager.clickSlot(handler.syncId, 50, 0, SlotActionType.PICKUP, mc.player);
-        currentState = State.SENDING_ORDER_COMMAND;
+        currentState = State.CLOSING_SPAWNER_MENU; // CHANGED
         delayCounter = actionDelay.get();
     }
 
+    private void handleClosingSpawnerMenu() {
+        info("Closing spawner menu before sending command");
+        mc.player.closeHandledScreen();
+        currentState = State.SENDING_ORDER_COMMAND;
+        delayCounter = actionDelay.get() * 2; // Give it time to close
+    }
+
     private void handleSendingOrderCommand() {
+        info("=== SENDING ORDER COMMAND ===");
         info("Sending /order bones command");
         mc.getNetworkHandler().sendChatCommand("order bones");
         currentState = State.WAITING_ORDER_MENU;
         delayCounter = actionDelay.get() * 2;
+        info("Now waiting for order menu... delay: " + delayCounter);
     }
 
     private void handleWaitingOrderMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 6) {
-            info("Order menu detected (6 rows)");
+        info("=== WAITING FOR ORDER MENU ===");
+        info("Current screen: " + (mc.currentScreen != null ? mc.currentScreen.getClass().getSimpleName() : "null"));
+
+        if (isOrdersMenu(handler)) {
+            info("Order menu detected (Orders - Page 1)");
             currentState = State.CLICK_BONE_SLOT;
             delayCounter = actionDelay.get();
+        } else {
+            info("Not order menu yet...");
         }
     }
 
@@ -853,20 +1124,28 @@ public class AutoSpawnerSell extends Module {
             return;
         }
 
+        // Priority slots 4-12, but select randomly
         int[] prioritySlots = {4, 5, 6, 7, 8, 9, 10, 11, 12};
-        int slotToClick = -1;
+        List<Integer> validPrioritySlots = new ArrayList<>();
 
+        // Find all valid priority slots with items
         for (int slot : prioritySlots) {
             if (slot < container.getRows() * 9) {
                 ItemStack stack = container.getSlot(slot).getStack();
                 if (!stack.isEmpty()) {
-                    slotToClick = slot;
-                    break;
+                    validPrioritySlots.add(slot);
                 }
             }
         }
 
-        if (slotToClick == -1) {
+        int slotToClick = -1;
+
+        // If we have valid priority slots, pick one randomly
+        if (!validPrioritySlots.isEmpty()) {
+            int randomIndex = (int)(Math.random() * validPrioritySlots.size());
+            slotToClick = validPrioritySlots.get(randomIndex);
+        } else {
+            // Fallback: search all slots
             for (int i = 0; i < Math.min(5 * 9, container.getRows() * 9); i++) {
                 ItemStack stack = container.getSlot(i).getStack();
                 if (!stack.isEmpty()) {
@@ -888,8 +1167,8 @@ public class AutoSpawnerSell extends Module {
     }
 
     private void handleWaitingDepositMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 4) {
-            info("Deposit menu detected (4 rows)");
+        if (isDepositMenu(handler)) {
+            info("Deposit menu detected (Orders -> Deliver Items)");
             currentState = State.DEPOSITING_BONES;
             delayCounter = actionDelay.get();
         }
@@ -902,77 +1181,81 @@ public class AutoSpawnerSell extends Module {
         }
 
         int containerSlots = container.getRows() * 9;
-        boolean chestFull = true;
 
-        for (int i = 0; i < containerSlots; i++) {
-            ItemStack stack = container.getSlot(i).getStack();
-            if (stack.isEmpty() || (stack.getItem() == Items.BONE && stack.getCount() < stack.getMaxCount())) {
-                chestFull = false;
-                break;
-            }
-        }
+        // Transfer all bones at once using a single pass
+        info("Depositing all bones to chest at once...");
 
-        boolean foundBones = false;
         for (int i = containerSlots; i < container.slots.size(); i++) {
             ItemStack stack = container.getSlot(i).getStack();
             if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
-                foundBones = true;
-                if (!chestFull) {
-                    info("Moving bones from slot " + i);
-                    mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                    delayCounter = actionDelay.get();
-                    return;
-                }
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
             }
         }
 
-        if (!foundBones || chestFull) {
-            info(chestFull ? "Chest is full, proceeding" : "All bones deposited");
-            currentState = State.CLOSING_DEPOSIT_MENU;
-            delayCounter = actionDelay.get();
-        }
+        info("All bones deposited!");
+        currentState = State.CLOSING_DEPOSIT_MENU;
+        delayCounter = actionDelay.get();
     }
 
     private void handleClosingDepositMenu() {
-        info("Closing deposit menu");
+        info("Closing deposit menu (Orders -> Deliver Items)");
         mc.player.closeHandledScreen();
         currentState = State.WAITING_CONFIRM_MENU;
         delayCounter = actionDelay.get() * 2;
     }
 
     private void handleWaitingConfirmMenu(ScreenHandler handler) {
-        if (handler instanceof GenericContainerScreenHandler container && container.getRows() == 3) {
-            info("Confirm menu detected (3 rows)");
+        if (isConfirmMenu(handler)) {
+            info("Confirm menu detected (Orders -> Confirm Delivery)");
             currentState = State.CLICK_CONFIRM_SLOT;
             delayCounter = actionDelay.get();
         }
     }
 
     private void handleClickConfirmSlot(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler)) {
+        if (!(handler instanceof GenericContainerScreenHandler container)) {
             currentState = State.RETRY_SEQUENCE;
             return;
         }
 
-        info("Clicking slot 15 to confirm");
-        mc.interactionManager.clickSlot(handler.syncId, 15, 0, SlotActionType.PICKUP, mc.player);
+        // Find and click lime glass pane
+        for (int i = 0; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (stack.getItem() == Items.LIME_STAINED_GLASS_PANE) {
+                info("Clicking lime glass pane to confirm in slot " + i);
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
 
-        chatMessageReceived = false;
-        waitingForChatMessage = true;
-        waitingForProfitMessage = false;
-        currentState = State.WAITING_FOR_CHAT_CONFIRMATION;
-        delayCounter = 5;
-        timeoutCounter = 0;
+                chatMessageReceived = false;
+                waitingForChatMessage = true;
+                waitingForProfitMessage = false;
+                currentState = State.WAITING_FOR_CHAT_CONFIRMATION;
+                delayCounter = 5;
+                timeoutCounter = 0;
+                return;
+            }
+        }
+
+        warning("Lime glass pane not found in confirm menu!");
+        currentState = State.RETRY_SEQUENCE;
     }
 
     private void handleWaitingForChatConfirmation() {
         timeoutCounter++;
 
         if (chatMessageReceived) {
-            info("Order successfully delivered! Closing inventories...");
+            info("Order successfully delivered!");
             waitingForChatMessage = false;
-            currentState = State.CLOSING_FIRST_INVENTORY;
-            delayCounter = 0;
+
+            // If we were selling during protect sequence, go back to protect flow
+            if (protectSelling) {
+                info("Bones sold during protect sequence - closing inventories and returning to protection");
+                currentState = State.CLOSING_FIRST_INVENTORY;
+                delayCounter = 0;
+            } else {
+                info("Closing inventories...");
+                currentState = State.CLOSING_FIRST_INVENTORY;
+                delayCounter = 0;
+            }
             return;
         }
 
@@ -982,9 +1265,17 @@ public class AutoSpawnerSell extends Module {
             waitingForProfitMessage = false;
             mc.player.closeHandledScreen();
 
-            currentState = SMPUtils.playerHasBones() ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
-            delayCounter = actionDelay.get() * 2;
-            info(SMPUtils.playerHasBones() ? "Player still has bones, retrying" : "No bones, restarting");
+            // If in protect selling mode, retry or continue protect sequence
+            if (protectSelling) {
+                info("Order expired during protect sequence - checking bones and continuing");
+                protectSelling = false;
+                currentState = State.PROTECT_CHECK_LIME_GLASS;
+                delayCounter = 0;
+            } else {
+                currentState = SMPUtils.playerHasBones() ? State.SENDING_ORDER_COMMAND : State.FINDING_SPAWNER;
+                delayCounter = actionDelay.get() * 2;
+                info(SMPUtils.playerHasBones() ? "Player still has bones, retrying" : "No bones, restarting");
+            }
         }
     }
 
@@ -998,8 +1289,17 @@ public class AutoSpawnerSell extends Module {
     private void handleClosingSecondInventory() {
         info("Closing second inventory");
         mc.player.closeHandledScreen();
-        currentState = State.LOOP_DELAY;
-        delayCounter = loopDelay.get();
+
+        // If we were selling during protect sequence, go back to protect flow
+        if (protectSelling) {
+            info("Bones sold during protect sequence - returning to protection");
+            protectSelling = false;
+            currentState = State.PROTECT_CHECK_LIME_GLASS;
+            delayCounter = 0;
+        } else {
+            currentState = State.LOOP_DELAY;
+            delayCounter = loopDelay.get();
+        }
     }
 
     private void handleLoopDelay() {
@@ -1022,9 +1322,83 @@ public class AutoSpawnerSell extends Module {
     }
 
     private void handleProtectDetectionWait() {
-        info("Detection wait complete, checking for lime glass...");
-        currentState = State.PROTECT_CHECK_LIME_GLASS;
-        delayCounter = 0;
+        info("Detection wait complete, checking current state...");
+
+        // Check if we're in a menu
+        if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler handler) {
+            // Check if we're in the delivery sequence (Deliver Items or Confirm Delivery)
+            if (isInDeliverySequence(handler)) {
+                if (isConfirmMenu(handler)) {
+                    info("Confirm Delivery menu detected - clicking lime glass pane to complete order");
+
+                    // Find and click lime glass pane
+                    for (int i = 0; i < handler.slots.size(); i++) {
+                        ItemStack stack = handler.getSlot(i).getStack();
+                        if (stack.getItem() == Items.LIME_STAINED_GLASS_PANE) {
+                            info("Clicking lime glass pane in slot " + i + " to confirm delivery");
+                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.PICKUP, mc.player);
+
+                            // Set flag to continue protect sequence after selling
+                            protectSelling = true;
+                            chatMessageReceived = false;
+                            waitingForChatMessage = true;
+                            waitingForProfitMessage = false;
+                            currentState = State.WAITING_FOR_CHAT_CONFIRMATION;
+                            delayCounter = 5;
+                            timeoutCounter = 0;
+                            return;
+                        }
+                    }
+
+                    warning("Lime glass pane not found in confirm menu during protection!");
+                } else if (isDepositMenu(handler)) {
+                    info("Deliver Items menu detected - depositing all bones to complete order");
+
+                    // Deposit all bones
+                    int containerSlots = handler.getRows() * 9;
+                    for (int i = containerSlots; i < handler.slots.size(); i++) {
+                        ItemStack stack = handler.getSlot(i).getStack();
+                        if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
+                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                        }
+                    }
+
+                    info("Bones deposited, waiting for confirm menu");
+                    protectSelling = true;
+                    currentState = State.CLOSING_DEPOSIT_MENU;
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+            }
+
+            // Close any other open screen
+            mc.player.closeHandledScreen();
+            info("Screens closed, checking for lime glass...");
+            currentState = State.PROTECT_CHECK_LIME_GLASS;
+            delayCounter = 0;
+        } else {
+            // No menu open - check bone count and decide next action
+            int boneCount = 0;
+            for (int i = 0; i < mc.player.getInventory().size(); i++) {
+                ItemStack stack = mc.player.getInventory().getStack(i);
+                if (stack.getItem() == Items.BONE) {
+                    boneCount += stack.getCount();
+                }
+            }
+
+            info("No menu open. Bone count: " + boneCount);
+
+            if (boneCount > 1152) {
+                info("Too many bones - need to sell them first");
+                protectSelling = true;
+                currentState = State.SENDING_ORDER_COMMAND;
+                delayCounter = actionDelay.get() * 2;
+            } else {
+                info("Bone count acceptable - proceeding to spawner mining");
+                currentState = State.PROTECT_CHECK_LIME_GLASS;
+                delayCounter = 0;
+            }
+        }
     }
 
     private void handleProtectCheckLimeGlass(ScreenHandler handler) {
@@ -1082,116 +1456,32 @@ public class AutoSpawnerSell extends Module {
     }
 
     private void handleProtectCheckInventory() {
-        if (SMPUtils.isInventoryFull()) {
-            info("Inventory is full! Looking for chest to deposit bones...");
-            currentState = State.PROTECT_FIND_CHEST;
-            delayCounter = 0;
-        } else {
-            info("Inventory has space. Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-        }
-    }
-
-    private void handleProtectFindChest() {
-        tempBoneChest = SMPUtils.findNearestChestForBones();
-
-        if (tempBoneChest == null) {
-            warning("No chest found for bone deposit! Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-            return;
-        }
-
-        info("Found chest at " + tempBoneChest + " for bone deposit");
-        currentState = State.PROTECT_OPEN_CHEST;
-        boneChestOpenAttempts = 0;
-        delayCounter = 5;
-    }
-
-    private void handleProtectOpenChest() {
-        if (tempBoneChest == null) {
-            currentState = State.PROTECT_FIND_CHEST;
-            return;
-        }
-
-        if (smoothAim.get() && !SmoothAimUtils.isRotating()) {
-            if (boneChestOpenAttempts % 3 == 0) {
-                SmoothAimUtils.startSmoothRotation(tempBoneChest, rotationSpeed.get(), () -> {
-                    SMPUtils.interactWithBlock(tempBoneChest);
-                    info("Opening chest for bone deposit... (attempt " + (boneChestOpenAttempts / 3 + 1) + ")");
-                });
-            }
-        } else if (!smoothAim.get()) {
-            SMPUtils.lookAtBlock(tempBoneChest);
-            if (boneChestOpenAttempts % 3 == 0) {
-                SMPUtils.interactWithBlock(tempBoneChest);
-                info("Opening chest for bone deposit... (attempt " + (boneChestOpenAttempts / 3 + 1) + ")");
-            }
-        } else {
-            return;
-        }
-
-        boneChestOpenAttempts++;
-
-        if (mc.player.currentScreenHandler instanceof GenericContainerScreenHandler) {
-            currentState = State.PROTECT_DEPOSIT_BONES_TO_CHEST;
-            lastProcessedSlot = -1;
-            info("Chest opened successfully! Depositing bones...");
-            delayCounter = 2;
-        }
-
-        if (boneChestOpenAttempts > 60) {
-            warning("Failed to open chest! Proceeding to spawner mining...");
-            SMPUtils.setSneaking(true, sneakingState);
-            currentState = State.PROTECT_GOING_TO_SPAWNERS;
-            delayCounter = 0;
-        }
-    }
-
-    private void handleProtectDepositBonesToChest(ScreenHandler handler) {
-        if (!(handler instanceof GenericContainerScreenHandler container)) {
-            currentState = State.PROTECT_OPEN_CHEST;
-            boneChestOpenAttempts = 0;
-            return;
-        }
-
-        int containerSlots = container.getRows() * 9;
-        boolean foundBones = false;
-
-        for (int i = containerSlots; i < container.slots.size(); i++) {
-            ItemStack stack = container.getSlot(i).getStack();
-            if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
-                foundBones = true;
-                info("Depositing bones from slot " + i + " to chest");
-                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
-                delayCounter = 2;
-                return;
+        // Count bones in inventory
+        int boneCount = 0;
+        for (int i = 0; i < mc.player.getInventory().size(); i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.getItem() == Items.BONE) {
+                boneCount += stack.getCount();
             }
         }
 
-        if (!foundBones) {
-            info("All bones deposited to chest!");
-            currentState = State.PROTECT_CLOSE_CHEST;
-            delayCounter = 2;
+        info("Total bones in inventory: " + boneCount);
+
+        // If more than 1152 bones, sell them first
+        if (boneCount > 1152) {
+            info("Too many bones (" + boneCount + ") - selling before mining spawners...");
+            currentState = State.SENDING_ORDER_COMMAND;
+            delayCounter = actionDelay.get() * 2;
+            return;
         }
-    }
 
-    private void handleProtectCloseChest() {
-        info("Closing chest after bone deposit");
-        mc.player.closeHandledScreen();
-        tempBoneChest = null;
-        currentState = State.PROTECT_RECHECK_WAIT;
-        delayCounter = 10;
-    }
-
-    private void handleProtectRecheckWait() {
-        info("Recheck wait complete, checking inventory again...");
-        currentState = State.PROTECT_CHECK_INVENTORY;
+        // Proceed directly to spawner mining
+        info("Inventory has space (" + boneCount + " bones). Proceeding to spawner mining...");
+        SMPUtils.setSneaking(true, sneakingState);
+        currentState = State.PROTECT_GOING_TO_SPAWNERS;
         delayCounter = 0;
     }
+
 
     private void handleProtectGoingToSpawners() {
         SMPUtils.setSneaking(true, sneakingState);
@@ -1375,5 +1665,49 @@ public class AutoSpawnerSell extends Module {
 
         info("Disconnected due to entity detection.");
         toggle();
+    }
+
+    // Helper methods to respect silent mode
+    private void info(String message) {
+        // Always show pause messages regardless of silent mode
+        if (message.contains("Pause complete, restarting sequence from spawner")) {
+            super.info(message);
+            return;
+        }
+
+        if (silentMode.get() == SilentMode.HideAll) return;
+
+        // Hide debug messages if HideDebug is enabled
+        if (silentMode.get() == SilentMode.HideDebug) {
+            // Check if this is a debug message
+            if (message.contains("=== SCREEN DEBUG ===") ||
+                message.contains("Screen Title:") ||
+                message.contains("Handler Type:") ||
+                message.contains("Container Rows:") ||
+                message.contains("Total Slots:") ||
+                message.contains("===") ||
+                message.contains("Checking") ||
+                message.contains("Has skeleton:") ||
+                message.contains("Has spawner:") ||
+                message.contains("Has confirm:") ||
+                message.contains("Has sell:") ||
+                message.contains("Current State:") ||
+                message.contains("Clicking") ||
+                message.contains("DEBUG")) {
+                return; // Don't show debug messages
+            }
+        }
+
+        super.info(message);
+    }
+
+    private void warning(String message) {
+        if (silentMode.get() == SilentMode.HideAll) return;
+        super.warning(message);
+    }
+
+    private void error(String message) {
+        if (silentMode.get() == SilentMode.HideAll) return;
+        super.error(message);
     }
 }

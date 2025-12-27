@@ -116,31 +116,110 @@ public abstract class Module implements ISerializable<Module>, Comparable<Module
 
     public void sendToggledMsg() {
         if (Config.get().chatFeedback.get() && chatFeedback) {
-            ChatUtils.forceNextPrefixClass(getClass());
-            ChatUtils.sendMsg(this.hashCode(), Formatting.GRAY, "Toggled (highlight)%s(default) %s(default).", title, isActive() ? Formatting.GREEN + "on" : Formatting.RED + "off");
+            // Check if this module is from the Skye addon
+            if (this.getClass().getPackage().getName().startsWith("com.example.addon")) {
+                // Send [Skye] message directly to chat HUD
+                net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+                if (client.inGameHud != null) {
+                    net.minecraft.text.MutableText text = net.minecraft.text.Text.literal("");
+                    text.append(net.minecraft.text.Text.literal("[").formatted(Formatting.GRAY));
+                    text.append(net.minecraft.text.Text.literal("Skye").formatted(Formatting.GOLD));
+                    text.append(net.minecraft.text.Text.literal("] ").formatted(Formatting.GRAY));
+                    text.append(net.minecraft.text.Text.literal("Toggled " + title + " ").formatted(Formatting.GRAY));
+                    text.append(net.minecraft.text.Text.literal(isActive() ? "on" : "off").formatted(isActive() ? Formatting.GREEN : Formatting.RED));
+                    text.append(net.minecraft.text.Text.literal(".").formatted(Formatting.GRAY));
+                    client.inGameHud.getChatHud().addMessage(text);
+                }
+            } else {
+                // Default Meteor behavior
+                ChatUtils.forceNextPrefixClass(getClass());
+                ChatUtils.sendMsg(this.hashCode(), Formatting.GRAY, "Toggled (highlight)%s(default) %s(default).", title, isActive() ? Formatting.GREEN + "on" : Formatting.RED + "off");
+            }
         }
     }
 
     public void info(Text message) {
-        ChatUtils.forceNextPrefixClass(getClass());
-        ChatUtils.sendMsg(title, message);
+        if (this.getClass().getPackage().getName().startsWith("com.example.addon")) {
+            // Skye prefix
+            net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+            if (client.inGameHud != null) {
+                net.minecraft.text.MutableText text = net.minecraft.text.Text.literal("");
+                text.append(net.minecraft.text.Text.literal("[").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal("Skye").formatted(Formatting.GOLD));
+                text.append(net.minecraft.text.Text.literal("] [").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(title).formatted(Formatting.LIGHT_PURPLE));
+                text.append(net.minecraft.text.Text.literal("] ").formatted(Formatting.GRAY));
+                text.append(message);
+                client.inGameHud.getChatHud().addMessage(text);
+            }
+        } else {
+            ChatUtils.forceNextPrefixClass(getClass());
+            ChatUtils.sendMsg(title, message);
+        }
     }
 
     public void info(String message, Object... args) {
-        ChatUtils.forceNextPrefixClass(getClass());
-        ChatUtils.infoPrefix(title, message, args);
+        if (this.getClass().getPackage().getName().startsWith("com.example.addon")) {
+            // Skye prefix
+            String formattedMessage = args.length > 0 ? String.format(message, args) : message;
+            net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+            if (client.inGameHud != null) {
+                net.minecraft.text.MutableText text = net.minecraft.text.Text.literal("");
+                text.append(net.minecraft.text.Text.literal("[").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal("Skye").formatted(Formatting.GOLD));
+                text.append(net.minecraft.text.Text.literal("] [").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(title).formatted(Formatting.LIGHT_PURPLE));
+                text.append(net.minecraft.text.Text.literal("] ").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(formattedMessage).formatted(Formatting.WHITE));
+                client.inGameHud.getChatHud().addMessage(text);
+            }
+        } else {
+            ChatUtils.forceNextPrefixClass(getClass());
+            ChatUtils.infoPrefix(title, message, args);
+        }
     }
 
     public void warning(String message, Object... args) {
-        ChatUtils.forceNextPrefixClass(getClass());
-        ChatUtils.warningPrefix(title, message, args);
+        if (this.getClass().getPackage().getName().startsWith("com.example.addon")) {
+            // Skye prefix
+            String formattedMessage = args.length > 0 ? String.format(message, args) : message;
+            net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+            if (client.inGameHud != null) {
+                net.minecraft.text.MutableText text = net.minecraft.text.Text.literal("");
+                text.append(net.minecraft.text.Text.literal("[").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal("Skye").formatted(Formatting.GOLD));
+                text.append(net.minecraft.text.Text.literal("] [").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(title).formatted(Formatting.LIGHT_PURPLE));
+                text.append(net.minecraft.text.Text.literal("] ").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(formattedMessage).formatted(Formatting.YELLOW));
+                client.inGameHud.getChatHud().addMessage(text);
+            }
+        } else {
+            ChatUtils.forceNextPrefixClass(getClass());
+            ChatUtils.warningPrefix(title, message, args);
+        }
     }
 
     public void error(String message, Object... args) {
-        ChatUtils.forceNextPrefixClass(getClass());
-        ChatUtils.errorPrefix(title, message, args);
+        if (this.getClass().getPackage().getName().startsWith("com.example.addon")) {
+            // Skye prefix
+            String formattedMessage = args.length > 0 ? String.format(message, args) : message;
+            net.minecraft.client.MinecraftClient client = net.minecraft.client.MinecraftClient.getInstance();
+            if (client.inGameHud != null) {
+                net.minecraft.text.MutableText text = net.minecraft.text.Text.literal("");
+                text.append(net.minecraft.text.Text.literal("[").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal("Skye").formatted(Formatting.GOLD));
+                text.append(net.minecraft.text.Text.literal("] [").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(title).formatted(Formatting.LIGHT_PURPLE));
+                text.append(net.minecraft.text.Text.literal("] ").formatted(Formatting.GRAY));
+                text.append(net.minecraft.text.Text.literal(formattedMessage).formatted(Formatting.RED));
+                client.inGameHud.getChatHud().addMessage(text);
+            }
+        } else {
+            ChatUtils.forceNextPrefixClass(getClass());
+            ChatUtils.errorPrefix(title, message, args);
+        }
     }
-
     public boolean isActive() {
         return active;
     }

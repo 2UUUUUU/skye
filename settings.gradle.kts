@@ -10,3 +10,9 @@ pluginManagement {
 }
 
 rootProject.name = "skye"
+
+includeBuild("meteorclient") {
+    dependencySubstitution {
+        substitute(module("meteordevelopment:meteor-client")).using(project(":"))
+    }
+}

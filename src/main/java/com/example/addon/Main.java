@@ -11,6 +11,11 @@ import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.systems.hud.HudGroup;
 import meteordevelopment.meteorclient.systems.modules.Category;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
+import net.minecraft.text.Text;
+import net.minecraft.text.Style;
+import net.minecraft.text.TextColor;
+import net.minecraft.util.Formatting;
 import org.slf4j.Logger;
 
 public class Main extends MeteorAddon {
@@ -22,6 +27,13 @@ public class Main extends MeteorAddon {
 
     @Override
     public void onInitialize() {
+        ChatUtils.registerCustomPrefix("com.example.addon", () -> {
+            return Text.empty()
+                .setStyle(Style.EMPTY.withFormatting(Formatting.GRAY))
+                .append("[")
+                .append(Text.literal("Skye").setStyle(Style.EMPTY.withColor(TextColor.fromRgb(0xFFA500)))) // Orange color
+                .append("] ");
+        });
         LOG.info("Initializing Skye");
 
         // Modules
