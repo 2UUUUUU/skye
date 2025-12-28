@@ -44,9 +44,11 @@ public class Main extends MeteorAddon {
         Modules.get().add(new HypixelExample());
         Modules.get().add(new DragonAssistant());
         Modules.get().add(new EtherwarpTest());
+        Modules.get().add(new Pathfinding());
 
         // Commands
         Commands.add(new CommandExample());
+        Commands.add(new PathCommand());
 
         // HUD
         Hud.get().register(HudExample.INFO);
