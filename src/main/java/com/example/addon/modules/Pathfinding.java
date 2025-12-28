@@ -40,8 +40,8 @@ public class Pathfinding extends Module {
     private final Setting<Double> waypointCheckpointDistance = sgGeneral.add(new DoubleSetting.Builder()
         .name("waypoint-checkpoint-distance")
         .description("Distance to consider a checkpoint waypoint reached")
-        .defaultValue(0.5)
-        .min(0.1)
+        .defaultValue(1.0)
+        .min(0.5)
         .max(3.0)
         .sliderMax(3.0)
         .build());
@@ -49,10 +49,10 @@ public class Pathfinding extends Module {
     private final Setting<Double> waypointFinalDistance = sgGeneral.add(new DoubleSetting.Builder()
         .name("waypoint-final-distance")
         .description("Distance to consider the final destination reached")
-        .defaultValue(0.5)
-        .min(0.1)
-        .max(3.0)
-        .sliderMax(3.0)
+        .defaultValue(1.5)
+        .min(0.5)
+        .max(5.0)
+        .sliderMax(5.0)
         .build());
 
     // Movement Settings
@@ -65,8 +65,8 @@ public class Pathfinding extends Module {
     private final Setting<Integer> rotationSpeed = sgMovement.add(new IntSetting.Builder()
         .name("rotation-speed")
         .description("Time in ticks to complete rotation (higher = slower/smoother)")
-        .defaultValue(10)
-        .min(1)
+        .defaultValue(15)
+        .min(5)
         .max(60)
         .sliderMax(60)
         .visible(smoothRotation::get)
