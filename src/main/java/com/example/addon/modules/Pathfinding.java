@@ -31,6 +31,12 @@ public class Pathfinding extends Module {
         .defaultValue(true)
         .build());
 
+    private final Setting<NodeCalculation> nodeCalculation = sgGeneral.add(new EnumSetting.Builder<NodeCalculation>()
+        .name("node-calculation")
+        .description("How often to place nodes on the path")
+        .defaultValue(NodeCalculation.EveryBlock)
+        .build());
+
     private final Setting<Double> waypointCheckpointDistance = sgGeneral.add(new DoubleSetting.Builder()
         .name("waypoint-checkpoint-distance")
         .description("Distance to consider a checkpoint waypoint reached")
@@ -74,7 +80,7 @@ public class Pathfinding extends Module {
 
     private final Setting<Boolean> sprint = sgMovement.add(new BoolSetting.Builder()
         .name("sprint")
-        .description("Sprint while moving")
+        .description("Sprint while moving forward")
         .defaultValue(true)
         .build());
 
@@ -99,8 +105,14 @@ public class Pathfinding extends Module {
 
     private final Setting<SettingColor> currentWaypointColor = sgRender.add(new ColorSetting.Builder()
         .name("current-waypoint-color")
-        .description("Color of the current waypoint")
+        .description("Color of the current target waypoint")
         .defaultValue(new Color(255, 0, 0, 200))
+        .build());
+
+    private final Setting<SettingColor> nextWaypointColor = sgRender.add(new ColorSetting.Builder()
+        .name("next-waypoint-color")
+        .description("Color of the next waypoint after current")
+        .defaultValue(new Color(255, 165, 0, 180))
         .build());
 
     private final Setting<Double> waypointSize = sgRender.add(new DoubleSetting.Builder()
@@ -124,8 +136,31 @@ public class Pathfinding extends Module {
     // Path executor
     private final PathExecutor pathExecutor = new PathExecutor();
 
+    public enum NodeCalculation {
+        EveryBlock("Every Block", 1),
+        Every2Blocks("Every 2 Blocks", 2),
+        Every3Blocks("Every 3 Blocks", 3);
+
+        private final String name;
+        private final int interval;
+
+        NodeCalculation(String name, int interval) {
+            this.name = name;
+            this.interval = interval;
+        }
+
+        public int getInterval() {
+            return interval;
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
     public Pathfinding() {
-        super(Main.CATEGORY, "pathfinding", "Ce module est infernal bordel");
+        super(Main.CATEGORY, "pathfinding", "Advanced A* pathfinding with smooth human-like movement");
     }
 
     @Override
@@ -155,6 +190,8 @@ public class Pathfinding extends Module {
         pathExecutor.setWaypointFinalDistance(waypointFinalDistance.get());
         pathExecutor.setSmoothRotation(smoothRotation.get(), rotationSpeed.get());
         pathExecutor.setBreakBlocks(breakBlocks.get());
+        pathExecutor.setSprint(sprint.get());
+        pathExecutor.setNodeInterval(nodeCalculation.get().getInterval());
 
         // Check if we should start executing a new path from command
         Path commandPath = PathCommand.getCurrentPath();
@@ -199,23 +236,32 @@ public class Pathfinding extends Module {
             );
         }
 
-        // Render waypoint markers
+        // Render waypoint markers - render INSIDE blocks at foot level
         BlockPos currentWaypoint = path.getCurrentWaypoint();
+        BlockPos nextWaypoint = path.getNextWaypoint();
 
         for (int i = 0; i < waypoints.size(); i++) {
             BlockPos pos = waypoints.get(i);
 
-            // Use different color for current waypoint
-            Color color = pos.equals(currentWaypoint) ?
-                currentWaypointColor.get() : waypointColor.get();
+            // Determine color based on waypoint type
+            Color color;
+            if (pos.equals(currentWaypoint)) {
+                color = currentWaypointColor.get();
+            } else if (pos.equals(nextWaypoint)) {
+                color = nextWaypointColor.get();
+            } else {
+                color = waypointColor.get();
+            }
 
             double size = waypointSize.get();
+
+            // Render at the BOTTOM of the block (foot level) - from Y to Y+0.1
             Box box = new Box(
                 pos.getX() + 0.5 - size / 2,
-                pos.getY() + 0.5 - size / 2,
+                pos.getY(), // Start at bottom of block
                 pos.getZ() + 0.5 - size / 2,
                 pos.getX() + 0.5 + size / 2,
-                pos.getY() + 0.5 + size / 2,
+                pos.getY() + 0.1, // Very thin layer at bottom
                 pos.getZ() + 0.5 + size / 2
             );
 
