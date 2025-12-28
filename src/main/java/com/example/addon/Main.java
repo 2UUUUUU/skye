@@ -22,7 +22,7 @@ public class Main extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
     public static final Category CATEGORY = new Category("SMP");
     public static final Category HYPIXEL_SKYBLOCK = new Category("Hypixel Skyblock");
-    public static final Category ETHERWARP_TEST = new Category("Etherwarp Test");
+    public static final Category TEST = new Category("Test");
     public static final HudGroup HUD_GROUP = new HudGroup("Example");
 
     @Override
@@ -56,7 +56,7 @@ public class Main extends MeteorAddon {
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
         Modules.registerCategory(HYPIXEL_SKYBLOCK);
-        Modules.registerCategory(ETHERWARP_TEST);
+        Modules.registerCategory(TEST);
     }
 
     @Override

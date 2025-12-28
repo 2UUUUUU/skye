@@ -1677,9 +1677,8 @@ public class AutoSpawnerSell extends Module {
 
         if (silentMode.get() == SilentMode.HideAll) return;
 
-        // Hide debug messages if HideDebug is enabled
         if (silentMode.get() == SilentMode.HideDebug) {
-            // Check if this is a debug message
+
             if (message.contains("=== SCREEN DEBUG ===") ||
                 message.contains("Screen Title:") ||
                 message.contains("Handler Type:") ||
@@ -1694,7 +1693,7 @@ public class AutoSpawnerSell extends Module {
                 message.contains("Current State:") ||
                 message.contains("Clicking") ||
                 message.contains("DEBUG")) {
-                return; // Don't show debug messages
+                return;
             }
         }
 

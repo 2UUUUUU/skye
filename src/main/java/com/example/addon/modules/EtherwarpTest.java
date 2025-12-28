@@ -20,7 +20,7 @@ public class EtherwarpTest extends Module {
     );
 
     public EtherwarpTest() {
-        super(Main.ETHERWARP_TEST, "etherwarp-test", "Hypixel Testing purposes.");
+        super(Main.TEST, "etherwarp-test", "Hypixel Testing purposes.");
     }
 
     @Override
