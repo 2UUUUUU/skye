@@ -10,7 +10,7 @@ import java.util.function.Consumer;
 
 /**
  * Executes a calculated path by controlling player movement with ultra-smooth humanized rotation
- * FIXED: Proper goal reaching, movement stopping, and natural rotation via RotationHelper
+ * FIXED: Proper goal reaching with X, Y, Z coordinate checks
  */
 public class PathExecutor {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
@@ -30,7 +30,7 @@ public class PathExecutor {
     // Path recalculation
     private int ticksSinceLastPathCheck;
     private static final int PATH_CHECK_INTERVAL = 20;
-    private static final int RECALC_AFTER_WAYPOINT_TICKS = 5; // Recalculate shortly after reaching waypoint
+    private static final int RECALC_AFTER_WAYPOINT_TICKS = 5;
     private int ticksSinceLastWaypoint = 0;
     private boolean shouldRecalcAfterWaypoint = false;
 
@@ -201,7 +201,12 @@ public class PathExecutor {
         }
 
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
-        Vec3d waypointVec = Vec3d.ofCenter(currentWaypoint);
+        // FIXED: Use block base position instead of center for Y coordinate
+        Vec3d waypointVec = new Vec3d(
+            currentWaypoint.getX() + 0.5,  // Center X
+            currentWaypoint.getY(),         // Base Y (player's feet level)
+            currentWaypoint.getZ() + 0.5   // Center Z
+        );
 
         boolean isFinalWaypoint = currentPath.getNextWaypoint() == null;
 
@@ -212,30 +217,40 @@ public class PathExecutor {
             distanceThreshold = Math.max(waypointCheckpointDistance * 1.5, 1.0);
         }
 
-        double distance;
+        // FIXED: Check X, Y, Z distances separately for proper 3D positioning
+        double dx = Math.abs(playerPos.x - waypointVec.x);
+        double dy = Math.abs(playerPos.y - waypointVec.y);
+        double dz = Math.abs(playerPos.z - waypointVec.z);
+
+        // Calculate 3D Euclidean distance
+        double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        // For final waypoint, require stricter positioning on all axes
+        boolean isWithinBounds = true;
         if (isFinalWaypoint) {
-            distance = playerPos.distanceTo(waypointVec);
-        } else {
-            double dx = playerPos.x - waypointVec.x;
-            double dz = playerPos.z - waypointVec.z;
-            distance = Math.sqrt(dx * dx + dz * dz);
+            // Must be within threshold on all three axes
+            double axisBound = distanceThreshold;
+            isWithinBounds = (dx <= axisBound) && (dy <= axisBound) && (dz <= axisBound);
         }
 
         // Debug output for final waypoint
         if (isFinalWaypoint && mc.player != null && ticksSinceLastJump % 20 == 0) {
             debug("Distance to final waypoint: " + String.format("%.3f", distance) + " / Threshold: " + String.format("%.3f", distanceThreshold));
+            debug("Axis distances - X: " + String.format("%.3f", dx) + ", Y: " + String.format("%.3f", dy) + ", Z: " + String.format("%.3f", dz));
+            debug("Within bounds: " + isWithinBounds);
         }
 
-        if (distance < distanceThreshold) {
+        // Check if waypoint is reached
+        if (distance < distanceThreshold && isWithinBounds) {
             if (isFinalWaypoint && mc.player != null) {
                 debug("✓ REACHED final waypoint! Distance: " + String.format("%.3f", distance) + " / Threshold: " + String.format("%.3f", distanceThreshold));
                 debug("Player pos: " + String.format("%.2f, %.2f, %.2f", playerPos.x, playerPos.y, playerPos.z));
-                debug("Goal pos: " + String.format("%.2f, %.2f, %.2f", waypointVec.x, waypointVec.y, waypointVec.z));
+                debug("Goal pos: " + String.format("%d, %d, %d", currentWaypoint.getX(), currentWaypoint.getY(), currentWaypoint.getZ()));
             }
 
             currentPath.advanceWaypoint();
             ticksSinceLastWaypoint = 0;
-            shouldRecalcAfterWaypoint = true; // Trigger recalculation after a short delay
+            shouldRecalcAfterWaypoint = true;
 
             if (currentPath.isComplete()) {
                 if (mc.player != null) {
@@ -252,7 +267,12 @@ public class PathExecutor {
                 stopMovement();
                 return;
             }
-            waypointVec = Vec3d.ofCenter(currentWaypoint);
+            // Update waypointVec with new target using base Y
+            waypointVec = new Vec3d(
+                currentWaypoint.getX() + 0.5,
+                currentWaypoint.getY(),
+                currentWaypoint.getZ() + 0.5
+            );
         }
 
         executeMovement(currentWaypoint, waypointVec);
@@ -472,14 +492,22 @@ public class PathExecutor {
         int maxLookAhead = Math.min(8, waypoints.size() - currentIndex - 1);
 
         if (maxLookAhead <= 0) {
-            return Vec3d.ofCenter(waypoints.get(waypoints.size() - 1));
+            return new Vec3d(
+                waypoints.get(waypoints.size() - 1).getX() + 0.5,
+                waypoints.get(waypoints.size() - 1).getY(),
+                waypoints.get(waypoints.size() - 1).getZ() + 0.5
+            );
         }
 
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
 
         for (int i = maxLookAhead; i > 0; i--) {
             BlockPos lookAheadPos = waypoints.get(currentIndex + i);
-            Vec3d lookAheadVec = Vec3d.ofCenter(lookAheadPos);
+            Vec3d lookAheadVec = new Vec3d(
+                lookAheadPos.getX() + 0.5,
+                lookAheadPos.getY(),
+                lookAheadPos.getZ() + 0.5
+            );
             double distance = playerPos.distanceTo(lookAheadVec);
 
             if (distance <= 16.0) {
@@ -487,7 +515,12 @@ public class PathExecutor {
             }
         }
 
-        return Vec3d.ofCenter(waypoints.get(currentIndex + 1));
+        BlockPos nextPos = waypoints.get(currentIndex + 1);
+        return new Vec3d(
+            nextPos.getX() + 0.5,
+            nextPos.getY(),
+            nextPos.getZ() + 0.5
+        );
     }
 
     private boolean isPathBlocked() {
@@ -557,44 +590,6 @@ public class PathExecutor {
         debug("Path recalculation after waypoint is disabled - continuing on current path");
         shouldRecalcAfterWaypoint = false;
         return;
-
-        /* ORIGINAL CODE - DISABLED
-        if (mc.player == null || currentPath == null) return;
-
-        BlockPos goal = currentPath.getGoal();
-        if (goal == null) return;
-
-        BlockPos currentPos = mc.player.getBlockPos();
-
-        // Don't recalculate if we're very close to the goal (within 10 blocks)
-        if (currentPos.getSquaredDistance(goal) < 100) {
-            debug("Too close to goal - skipping recalculation");
-            return;
-        }
-
-        // Don't recalculate if we have very few waypoints left
-        int remainingWaypoints = currentPath.getLength() - currentPath.getCurrentWaypointIndex();
-        if (remainingWaypoints < 10) {
-            debug("Few waypoints remaining (" + remainingWaypoints + ") - skipping recalculation");
-            return;
-        }
-
-        com.example.addon.pathfinding.Path newPath =
-            com.example.addon.pathfinding.Pathfinder.findPath(currentPos, goal);
-
-        if (newPath != null) {
-            int currentRemaining = currentPath.getLength() - currentPath.getCurrentWaypointIndex();
-            int newLength = newPath.getLength();
-
-            // Only use new path if it's significantly shorter (at least 30% shorter)
-            if (newLength < currentRemaining * 0.7) {
-                debug("Found more efficient path: " + currentRemaining + " → " + newLength + " waypoints remaining");
-                setPath(newPath);
-            } else {
-                debug("Current path is optimal - continuing (current: " + currentRemaining + ", new: " + newLength + ")");
-            }
-        }
-        */
     }
 
     private boolean isBlockInWay() {
