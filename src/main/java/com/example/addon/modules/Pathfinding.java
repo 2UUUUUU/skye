@@ -31,9 +31,18 @@ public class Pathfinding extends Module {
         .defaultValue(true)
         .build());
 
-    private final Setting<Double> waypointReachDistance = sgGeneral.add(new DoubleSetting.Builder()
-        .name("waypoint-reach-distance")
-        .description("Distance to consider a waypoint reached")
+    private final Setting<Double> waypointCheckpointDistance = sgGeneral.add(new DoubleSetting.Builder()
+        .name("waypoint-checkpoint-distance")
+        .description("Distance to consider a checkpoint waypoint reached")
+        .defaultValue(0.5)
+        .min(0.1)
+        .max(3.0)
+        .sliderMax(3.0)
+        .build());
+
+    private final Setting<Double> waypointFinalDistance = sgGeneral.add(new DoubleSetting.Builder()
+        .name("waypoint-final-distance")
+        .description("Distance to consider the final destination reached")
         .defaultValue(0.5)
         .min(0.1)
         .max(3.0)
@@ -49,11 +58,11 @@ public class Pathfinding extends Module {
 
     private final Setting<Integer> rotationSpeed = sgMovement.add(new IntSetting.Builder()
         .name("rotation-speed")
-        .description("Rotation speed in degrees per tick (lower = more human-like)")
-        .defaultValue(15)
-        .min(5)
-        .max(180)
-        .sliderMax(180)
+        .description("Time in ticks to complete rotation (higher = slower/smoother)")
+        .defaultValue(10)
+        .min(1)
+        .max(60)
+        .sliderMax(60)
         .visible(smoothRotation::get)
         .build());
 
@@ -116,7 +125,7 @@ public class Pathfinding extends Module {
     private final PathExecutor pathExecutor = new PathExecutor();
 
     public Pathfinding() {
-        super(Main.CATEGORY, "pathfinding", "Visualize and execute calculated paths");
+        super(Main.CATEGORY, "pathfinding", "Ce module est infernal bordel");
     }
 
     @Override
@@ -142,7 +151,8 @@ public class Pathfinding extends Module {
         if (mc.player == null || mc.world == null) return;
 
         // Update executor settings
-        pathExecutor.setWaypointReachDistance(waypointReachDistance.get());
+        pathExecutor.setWaypointCheckpointDistance(waypointCheckpointDistance.get());
+        pathExecutor.setWaypointFinalDistance(waypointFinalDistance.get());
         pathExecutor.setSmoothRotation(smoothRotation.get(), rotationSpeed.get());
         pathExecutor.setBreakBlocks(breakBlocks.get());
 
