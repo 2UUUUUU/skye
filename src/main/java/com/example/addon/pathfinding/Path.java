@@ -67,6 +67,13 @@ public class Path {
     }
 
     /**
+     * Get the current waypoint index
+     */
+    public int getCurrentWaypointIndex() {
+        return currentWaypointIndex;
+    }
+
+    /**
      * Get the next waypoint after the current one
      */
     public BlockPos getNextWaypoint() {
@@ -121,6 +128,31 @@ public class Path {
     public double getProgress() {
         if (waypoints.isEmpty()) return 1.0;
         return (double) currentWaypointIndex / (waypoints.size() - 1);
+    }
+
+    /**
+     * Calculate the actual block distance of the path (sum of distances between waypoints)
+     */
+    public double getPathDistance() {
+        if (waypoints.size() < 2) return 0.0;
+
+        double distance = 0.0;
+        for (int i = 0; i < waypoints.size() - 1; i++) {
+            BlockPos current = waypoints.get(i);
+            BlockPos next = waypoints.get(i + 1);
+            distance += Math.sqrt(current.getSquaredDistance(next));
+        }
+        return distance;
+    }
+
+    /**
+     * Get straight-line distance from start to goal
+     */
+    public double getStraightLineDistance() {
+        if (waypoints.size() < 2) return 0.0;
+        BlockPos start = waypoints.get(0);
+        BlockPos goal = waypoints.get(waypoints.size() - 1);
+        return Math.sqrt(start.getSquaredDistance(goal));
     }
 
     @Override

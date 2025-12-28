@@ -41,7 +41,7 @@ public class Pathfinding extends Module {
         .name("waypoint-checkpoint-distance")
         .description("Distance to consider a checkpoint waypoint reached")
         .defaultValue(1.0)
-        .min(0.5)
+        .min(0.0)
         .max(3.0)
         .sliderMax(3.0)
         .build());
@@ -50,9 +50,15 @@ public class Pathfinding extends Module {
         .name("waypoint-final-distance")
         .description("Distance to consider the final destination reached")
         .defaultValue(1.5)
-        .min(0.5)
+        .min(0.0)
         .max(5.0)
         .sliderMax(5.0)
+        .build());
+
+    private final Setting<Boolean> debugOutput = sgGeneral.add(new BoolSetting.Builder()
+        .name("debug-output")
+        .description("Show debug messages in chat")
+        .defaultValue(true)
         .build());
 
     // Movement Settings
@@ -82,6 +88,15 @@ public class Pathfinding extends Module {
         .name("sprint")
         .description("Sprint while moving forward")
         .defaultValue(true)
+        .build());
+
+    private final Setting<Integer> maxFallDistance = sgMovement.add(new IntSetting.Builder()
+        .name("max-fall-distance")
+        .description("Maximum fall distance in blocks before considering path blocked")
+        .defaultValue(3)
+        .min(0)
+        .max(150)
+        .sliderMax(150)
         .build());
 
     // Render Settings
@@ -165,19 +180,32 @@ public class Pathfinding extends Module {
 
     @Override
     public void onActivate() {
-        info("Pathfinding visualization enabled");
+        // Set debug callback for PathExecutor
+        pathExecutor.setDebugCallback(msg -> {
+            if (debugOutput.get()) {
+                info(msg);
+            }
+        });
+
+        if (debugOutput.get()) {
+            info("Pathfinding visualization enabled");
+        }
 
         // Set path from command if available
         Path commandPath = PathCommand.getCurrentPath();
         if (commandPath != null && autoExecute.get()) {
             pathExecutor.setPath(commandPath);
-            info("Executing path with " + commandPath.getLength() + " waypoints");
+            if (debugOutput.get()) {
+                info("Executing path with " + commandPath.getLength() + " waypoints");
+            }
         }
     }
 
     @Override
     public void onDeactivate() {
-        info("Pathfinding visualization disabled");
+        if (debugOutput.get()) {
+            info("Pathfinding visualization disabled");
+        }
         pathExecutor.clearPath();
     }
 
@@ -192,12 +220,15 @@ public class Pathfinding extends Module {
         pathExecutor.setBreakBlocks(breakBlocks.get());
         pathExecutor.setSprint(sprint.get());
         pathExecutor.setNodeInterval(nodeCalculation.get().getInterval());
+        pathExecutor.setMaxFallDistance(maxFallDistance.get());
 
         // Check if we should start executing a new path from command
         Path commandPath = PathCommand.getCurrentPath();
         if (autoExecute.get() && commandPath != null && pathExecutor.getPath() != commandPath) {
             pathExecutor.setPath(commandPath);
-            info("Started executing new path");
+            if (debugOutput.get()) {
+                info("Started executing new path");
+            }
         }
 
         // Execute path movement

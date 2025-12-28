@@ -22,13 +22,14 @@ public class PathCommand extends Command {
 
     @Override
     public void build(LiteralArgumentBuilder<CommandSource> builder) {
-        // .path <x> <y> <z>
+        // .path clear
         builder.then(literal("clear").executes(context -> {
             currentPath = null;
             info("Path cleared.");
             return SINGLE_SUCCESS;
         }));
 
+        // .path <x> <y> <z>
         builder.then(argument("x", IntegerArgumentType.integer())
             .then(argument("y", IntegerArgumentType.integer())
                 .then(argument("z", IntegerArgumentType.integer())
@@ -91,7 +92,8 @@ public class PathCommand extends Command {
         info("Path found! (took " + duration + "ms)");
         info("Waypoints: " + path.getLength());
         info("Total cost: " + String.format("%.2f", path.getTotalCost()));
-        info("Distance: " + String.format("%.1f", start.getSquaredDistance(goal)));
+        info("Path distance: " + String.format("%.1f", path.getPathDistance()) + " blocks");
+        info("Straight-line distance: " + String.format("%.1f", path.getStraightLineDistance()) + " blocks");
 
         return SINGLE_SUCCESS;
     }
