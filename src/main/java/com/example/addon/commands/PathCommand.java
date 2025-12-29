@@ -76,7 +76,7 @@ public class PathCommand extends Command {
         BlockPos start = mc.player.getBlockPos();
         BlockPos goal = new BlockPos(x, y, z);
 
-        info("Finding path from " + formatPos(start) + " to " + formatPos(goal) + "...");
+        info("Calculating path from " + formatPos(start) + " to " + formatPos(goal) + "...");
 
         long startTime = System.currentTimeMillis();
         Path path = Pathfinder.findPath(start, goal);
@@ -93,7 +93,7 @@ public class PathCommand extends Command {
         info("Waypoints: " + path.getLength());
         info("Total cost: " + String.format("%.2f", path.getTotalCost()));
         info("Path distance: " + String.format("%.1f", path.getPathDistance()) + " blocks");
-        info("Straight-line distance: " + String.format("%.1f", path.getStraightLineDistance()) + " blocks");
+        info("Crow fly distance: " + String.format("%.1f", path.getStraightLineDistance()) + " blocks");
 
         return SINGLE_SUCCESS;
     }

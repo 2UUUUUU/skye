@@ -14,6 +14,7 @@ import java.util.function.Consumer;
 /**
  * Executes a calculated path with water physics, collision detection, gap jumping, and line-of-sight targeting
  * FIXED VERSION - Compatible with Minecraft 1.21.10
+ * FIX: Prevents calibration from aiming down at close waypoints
  */
 public class PathExecutor {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
@@ -55,7 +56,8 @@ public class PathExecutor {
     private boolean isCalibrating = false;
     private int calibrationTicks = 0;
     private static final int MAX_CALIBRATION_TICKS = 40; // 2 seconds max
-    private static final double CALIBRATION_ANGLE_THRESHOLD = 10.0; // 10 degrees tolerance
+    private static final double CALIBRATION_ANGLE_THRESHOLD = 15.0; // 15 degrees tolerance (increased from 10)
+    private static final double MIN_AIM_DISTANCE = 1.0; // Minimum distance to aim at target
 
     // Track if we've reached the goal
     private boolean hasReachedGoal = false;
@@ -218,7 +220,6 @@ public class PathExecutor {
         }
 
         // Use line of sight to find visible waypoint for AIMING only
-        // We don't advance waypoints until player physically reaches them
         List<BlockPos> waypoints = currentPath.getWaypoints();
         int visibleWaypointIndex = LineOfSightChecker.findFurthestVisibleWaypoint(
             waypoints,
@@ -226,7 +227,7 @@ public class PathExecutor {
             8
         );
 
-        // Get the visible waypoint for aiming, but keep currentWaypoint for distance checking
+        // Get the visible waypoint for aiming
         BlockPos aimTarget = currentWaypoint;
         if (visibleWaypointIndex > currentPath.getCurrentWaypointIndex() &&
             visibleWaypointIndex < waypoints.size()) {
@@ -236,27 +237,13 @@ public class PathExecutor {
             }
         }
 
-        if (currentWaypoint == null) {
-            hasReachedGoal = true;
-            stopMovement();
-            return;
-        }
-
         Vec3d playerPosVec = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
 
-        // Check distance to CURRENT waypoint (the one we need to reach)
+        // Check distance to CURRENT waypoint (for completion check)
         Vec3d waypointVec = new Vec3d(
             currentWaypoint.getX() + 0.5,
             currentWaypoint.getY(),
             currentWaypoint.getZ() + 0.5
-        );
-
-        // Get aim target vector (may be different from waypoint for line of sight)
-        // Aim slightly higher (+0.5 Y) for smoother movement
-        Vec3d aimTargetVec = new Vec3d(
-            aimTarget.getX() + 0.5,
-            aimTarget.getY() + 0.5,
-            aimTarget.getZ() + 0.5
         );
 
         boolean isFinalWaypoint = currentPath.getNextWaypoint() == null;
@@ -264,7 +251,7 @@ public class PathExecutor {
         double distanceThreshold = isFinalWaypoint ? waypointFinalDistance :
             Math.max(waypointCheckpointDistance * 1.5, 1.0);
 
-        // Calculate distance to CURRENT waypoint (for completion check)
+        // Calculate distance to CURRENT waypoint
         double dx = Math.abs(playerPosVec.x - waypointVec.x);
         double dy = Math.abs(playerPosVec.y - waypointVec.y);
         double dz = Math.abs(playerPosVec.z - waypointVec.z);
@@ -275,6 +262,30 @@ public class PathExecutor {
             double axisBound = distanceThreshold;
             isWithinBounds = (dx <= axisBound) && (dy <= axisBound) && (dz <= axisBound);
         }
+
+        // Check if we're very close to current waypoint - BEFORE choosing aim target
+        double distanceToCurrentWaypoint = Math.sqrt(
+            Math.pow(playerPosVec.x - waypointVec.x, 2) +
+                Math.pow(playerPosVec.y - waypointVec.y, 2) +
+                Math.pow(playerPosVec.z - waypointVec.z, 2)
+        );
+
+        // FIX: If we're within checkpoint distance and not at final waypoint,
+        // aim at NEXT waypoint instead to prevent looking down
+        if (distanceToCurrentWaypoint < waypointCheckpointDistance && !isFinalWaypoint) {
+            BlockPos nextWp = currentPath.getNextWaypoint();
+            if (nextWp != null) {
+                aimTarget = nextWp;
+                debug("Very close to waypoint, aiming at next one to avoid looking down");
+            }
+        }
+
+        // Get aim target vector (slightly higher for smoother movement)
+        Vec3d aimTargetVec = new Vec3d(
+            aimTarget.getX() + 0.5,
+            aimTarget.getY() + 0.5,
+            aimTarget.getZ() + 0.5
+        );
 
         // Only advance waypoint when player PHYSICALLY reaches it
         if (distance < distanceThreshold && isWithinBounds) {
@@ -318,7 +329,6 @@ public class PathExecutor {
                 aimTarget = waypoints.get(visibleWaypointIndex);
             }
 
-            // Aim slightly higher (+0.5 Y) for smoother movement
             aimTargetVec = new Vec3d(
                 aimTarget.getX() + 0.5,
                 aimTarget.getY() + 0.5,
@@ -326,30 +336,7 @@ public class PathExecutor {
             );
         }
 
-        // Check if player is already very close to current waypoint (within checkpoint distance)
-        // If so, don't aim at it to prevent looking down and getting stuck
-        double distanceToCurrentWaypoint = Math.sqrt(
-            Math.pow(playerPosVec.x - waypointVec.x, 2) +
-                Math.pow(playerPosVec.y - waypointVec.y, 2) +
-                Math.pow(playerPosVec.z - waypointVec.z, 2)
-        );
-
-        // If we're within checkpoint distance of current waypoint, skip aiming at it
-        // and look at the next waypoint instead to avoid downward aim issues
-        if (distanceToCurrentWaypoint < waypointCheckpointDistance && !isFinalWaypoint) {
-            BlockPos nextWp = currentPath.getNextWaypoint();
-            if (nextWp != null) {
-                // Aim at next waypoint instead
-                aimTargetVec = new Vec3d(
-                    nextWp.getX() + 0.5,
-                    nextWp.getY() + 0.5,
-                    nextWp.getZ() + 0.5
-                );
-                debug("Very close to waypoint, aiming at next one to avoid looking down");
-            }
-        }
-
-        // Execute movement toward aim target (visible waypoint)
+        // Execute movement toward aim target
         executeMovement(currentWaypoint, aimTargetVec);
         movementState.tick();
     }
@@ -384,6 +371,38 @@ public class PathExecutor {
 
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         Vec3d directionToTarget = targetVec.subtract(playerPos).normalize();
+
+        // FIX: Calculate actual distance to target for proximity check
+        double distanceToTarget = playerPos.distanceTo(targetVec);
+
+        // If we're EXTREMELY close to the target (within 1 block), just move forward without rotating
+        // This prevents the circular/square aiming motion at close range
+        if (distanceToTarget < 1.0) {
+            debug("Very close to target (" + String.format("%.2f", distanceToTarget) + " blocks) - moving forward without rotation");
+
+            KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
+            KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
+            KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
+
+            boolean shouldJump = shouldJump(waypoint, nextWaypoint);
+            if (shouldJump && ticksSinceLastJump >= MIN_JUMP_COOLDOWN) {
+                KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), true);
+                movementState.setAction(MovementState.Action.JUMPING);
+                ticksSinceLastJump = 0;
+            } else {
+                KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), false);
+                if (mc.player.isOnGround()) {
+                    movementState.setAction(MovementState.Action.WALKING);
+                } else {
+                    movementState.setAction(MovementState.Action.FALLING);
+                }
+            }
+
+            // No sprinting when very close
+            mc.player.setSprinting(false);
+            return; // Skip rotation logic entirely
+        }
 
         // Calculate angle to target
         double targetYaw = Math.toDegrees(Math.atan2(-directionToTarget.x, directionToTarget.z));
@@ -580,7 +599,7 @@ public class PathExecutor {
 
         if (!hasGap) return false;
 
-        // Check distance to edge - use manual calculation
+        // Check distance to edge
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         Vec3d edgePos = Vec3d.ofCenter(current);
         double dx = playerPos.x - edgePos.x;
@@ -627,7 +646,6 @@ public class PathExecutor {
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         Vec3d edgeVec = Vec3d.ofCenter(edgePos);
 
-        // Manual horizontal distance calculation
         double dx = playerPos.x - edgeVec.x;
         double dz = playerPos.z - edgeVec.z;
         double horizontalDist = Math.sqrt(dx * dx + dz * dz);
@@ -654,15 +672,6 @@ public class PathExecutor {
             debug("No alternative path found - clearing path");
             clearPath();
         }
-    }
-
-    private boolean isMovingForward() {
-        if (mc.player == null || mc.world == null) return false;
-
-        Vec3d velocity = mc.player.getVelocity();
-        double horizontalSpeed = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
-
-        return horizontalSpeed >= 0.05;
     }
 
     private boolean shouldJump(BlockPos current, BlockPos next) {

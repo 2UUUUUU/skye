@@ -130,6 +130,12 @@ public class Pathfinding extends Module {
         .defaultValue(new Color(255, 165, 0, 180))
         .build());
 
+    private final Setting<SettingColor> playerMarkerColor = sgRender.add(new ColorSetting.Builder()
+        .name("player-marker-color")
+        .description("Color of the player position marker (blue square)")
+        .defaultValue(new Color(0, 150, 255, 200))
+        .build());
+
     private final Setting<Double> waypointSize = sgRender.add(new DoubleSetting.Builder()
         .name("waypoint-size")
         .description("Size of waypoint markers")
@@ -315,7 +321,7 @@ public class Pathfinding extends Module {
             event.renderer.box(goalBox, lineColor.get(), lineColor.get(), ShapeMode.Both, 0);
         }
 
-        // Render current position marker
+        // Render current position marker (now uses playerMarkerColor setting)
         if (mc.player != null && pathExecutor.isExecuting()) {
             BlockPos playerPos = mc.player.getBlockPos();
             double playerSize = waypointSize.get() * 0.8;
@@ -328,8 +334,8 @@ public class Pathfinding extends Module {
                 playerPos.getZ() + 0.5 + playerSize / 2
             );
 
-            Color playerColor = new Color(0, 150, 255, 200);
-            event.renderer.box(playerBox, playerColor, playerColor, ShapeMode.Both, 0);
+            // Use the playerMarkerColor setting instead of hardcoded color
+            event.renderer.box(playerBox, playerMarkerColor.get(), playerMarkerColor.get(), ShapeMode.Both, 0);
         }
     }
 
