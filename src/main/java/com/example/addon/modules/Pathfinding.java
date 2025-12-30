@@ -90,6 +90,13 @@ public class Pathfinding extends Module {
         .defaultValue(true)
         .build());
 
+    // NEW: Look-ahead prediction setting
+    private final Setting<Boolean> useLookAhead = sgMovement.add(new BoolSetting.Builder()
+        .name("use-look-ahead")
+        .description("Use predictive look-ahead for smoother curves around corners")
+        .defaultValue(true)
+        .build());
+
     private final Setting<Integer> maxFallDistance = sgMovement.add(new IntSetting.Builder()
         .name("max-fall-distance")
         .description("Maximum fall distance in blocks before considering path blocked")
@@ -227,6 +234,7 @@ public class Pathfinding extends Module {
         pathExecutor.setSprint(sprint.get());
         pathExecutor.setNodeInterval(nodeCalculation.get().getInterval());
         pathExecutor.setMaxFallDistance(maxFallDistance.get());
+        pathExecutor.setUseLookAhead(useLookAhead.get()); // NEW: Set look-ahead preference
 
         // Check if we should start executing a new path from command
         Path commandPath = PathCommand.getCurrentPath();

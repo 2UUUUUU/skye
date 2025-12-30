@@ -12,9 +12,12 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /**
- * Executes a calculated path with water physics, collision detection, gap jumping, and line-of-sight targeting
- * FIXED VERSION - Compatible with Minecraft 1.21.10
- * FIX: Prevents calibration from aiming down at close waypoints
+ * IMPROVED VERSION - Smoother, more Baritone-like rotation
+ * Key changes:
+ * 1. Removed aggressive calibration stops
+ * 2. Continuous rotation during movement
+ * 3. Simplified rotation logic
+ * 4. Better close-range handling
  */
 public class PathExecutor {
     private static final MinecraftClient mc = MinecraftClient.getInstance();
@@ -52,18 +55,21 @@ public class PathExecutor {
     private BlockPos currentBreakingBlock;
     private int breakingTicks;
 
-    // Calibration state
-    private boolean isCalibrating = false;
-    private int calibrationTicks = 0;
-    private static final int MAX_CALIBRATION_TICKS = 40; // 2 seconds max
-    private static final double CALIBRATION_ANGLE_THRESHOLD = 15.0; // 15 degrees tolerance (increased from 10)
-    private static final double MIN_AIM_DISTANCE = 1.0; // Minimum distance to aim at target
-
     // Track if we've reached the goal
     private boolean hasReachedGoal = false;
 
     // Debug callback
     private Consumer<String> debugCallback = null;
+
+    // NEW: Rotation smoothness settings
+    private static final double ROTATION_SMOOTHNESS = 0.3; // Lower = smoother (0.1 - 0.5)
+    private static final double MIN_ROTATION_SPEED = 5.0; // Minimum degrees per tick
+    private static final double MAX_ROTATION_SPEED = 30.0; // Maximum degrees per tick
+
+    // PHASE 2.2: Look-ahead prediction settings
+    private static final int LOOKAHEAD_WAYPOINTS = 3; // How many waypoints to look ahead
+    private static final double LOOKAHEAD_DISTANCE = 8.0; // Max distance to look ahead (blocks)
+    private boolean useLookAhead = true; // Can be toggled via settings
 
     public PathExecutor() {
         this.movementState = new MovementState();
@@ -138,8 +144,6 @@ public class PathExecutor {
         waterJumpCooldown = 0;
         isPreparingGapJump = false;
         gapJumpTicks = 0;
-        isCalibrating = false;
-        calibrationTicks = 0;
         RotationHelper.cancelHumanLikeRotation();
     }
 
@@ -170,6 +174,14 @@ public class PathExecutor {
 
     public void setMaxFallDistance(int distance) {
         this.maxFallDistance = Math.max(0, distance);
+    }
+
+    public void setUseLookAhead(boolean useLookAhead) {
+        this.useLookAhead = useLookAhead;
+    }
+
+    public boolean isUsingLookAhead() {
+        return useLookAhead;
     }
 
     public void tick() {
@@ -219,22 +231,39 @@ public class PathExecutor {
             return;
         }
 
-        // Use line of sight to find visible waypoint for AIMING only
-        List<BlockPos> waypoints = currentPath.getWaypoints();
-        int visibleWaypointIndex = LineOfSightChecker.findFurthestVisibleWaypoint(
-            waypoints,
-            currentPath.getCurrentWaypointIndex(),
-            8
-        );
+        // PHASE 2.2: Get optimal aim target using look-ahead prediction
+        Vec3d aimTargetVec;
+        BlockPos aimTarget;
 
-        // Get the visible waypoint for aiming
-        BlockPos aimTarget = currentWaypoint;
-        if (visibleWaypointIndex > currentPath.getCurrentWaypointIndex() &&
-            visibleWaypointIndex < waypoints.size()) {
-            aimTarget = waypoints.get(visibleWaypointIndex);
-            if (visibleWaypointIndex != currentPath.getCurrentWaypointIndex()) {
-                debug("Aiming at visible waypoint " + visibleWaypointIndex + " while moving to waypoint " + currentPath.getCurrentWaypointIndex());
+        if (useLookAhead) {
+            // Use weighted look-ahead for smoother curved paths
+            aimTargetVec = getWeightedLookAheadTarget();
+            // For waypoint completion checks, still use actual waypoint
+            aimTarget = currentWaypoint;
+
+            if (debugCallback != null && currentPath.getCurrentWaypointIndex() % 5 == 0) {
+                debug("Using look-ahead prediction for smoother curves");
             }
+        } else {
+            // Use line of sight to find visible waypoint (old method)
+            List<BlockPos> waypoints = currentPath.getWaypoints();
+            int visibleWaypointIndex = LineOfSightChecker.findFurthestVisibleWaypoint(
+                waypoints,
+                currentPath.getCurrentWaypointIndex(),
+                8
+            );
+
+            aimTarget = currentWaypoint;
+            if (visibleWaypointIndex > currentPath.getCurrentWaypointIndex() &&
+                visibleWaypointIndex < waypoints.size()) {
+                aimTarget = waypoints.get(visibleWaypointIndex);
+            }
+
+            aimTargetVec = new Vec3d(
+                aimTarget.getX() + 0.5,
+                aimTarget.getY() + 0.5,
+                aimTarget.getZ() + 0.5
+            );
         }
 
         Vec3d playerPosVec = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
@@ -247,7 +276,6 @@ public class PathExecutor {
         );
 
         boolean isFinalWaypoint = currentPath.getNextWaypoint() == null;
-
         double distanceThreshold = isFinalWaypoint ? waypointFinalDistance :
             Math.max(waypointCheckpointDistance * 1.5, 1.0);
 
@@ -263,31 +291,26 @@ public class PathExecutor {
             isWithinBounds = (dx <= axisBound) && (dy <= axisBound) && (dz <= axisBound);
         }
 
-        // Check if we're very close to current waypoint - BEFORE choosing aim target
+        // Aim at next waypoint if very close to current to prevent looking down
         double distanceToCurrentWaypoint = Math.sqrt(
             Math.pow(playerPosVec.x - waypointVec.x, 2) +
                 Math.pow(playerPosVec.y - waypointVec.y, 2) +
                 Math.pow(playerPosVec.z - waypointVec.z, 2)
         );
 
-        // FIX: If we're within checkpoint distance and not at final waypoint,
-        // aim at NEXT waypoint instead to prevent looking down
         if (distanceToCurrentWaypoint < waypointCheckpointDistance && !isFinalWaypoint) {
             BlockPos nextWp = currentPath.getNextWaypoint();
-            if (nextWp != null) {
-                aimTarget = nextWp;
-                debug("Very close to waypoint, aiming at next one to avoid looking down");
+            if (nextWp != null && !useLookAhead) {
+                // Only override if not using look-ahead (look-ahead handles this better)
+                aimTargetVec = new Vec3d(
+                    nextWp.getX() + 0.5,
+                    nextWp.getY() + 0.5,
+                    nextWp.getZ() + 0.5
+                );
             }
         }
 
-        // Get aim target vector (slightly higher for smoother movement)
-        Vec3d aimTargetVec = new Vec3d(
-            aimTarget.getX() + 0.5,
-            aimTarget.getY() + 0.5,
-            aimTarget.getZ() + 0.5
-        );
-
-        // Only advance waypoint when player PHYSICALLY reaches it
+        // Advance waypoint when player reaches it
         if (distance < distanceThreshold && isWithinBounds) {
             if (isFinalWaypoint) {
                 debug("✓ REACHED final waypoint!");
@@ -310,30 +333,16 @@ public class PathExecutor {
                 return;
             }
 
-            // Update vectors for new waypoint
-            waypointVec = new Vec3d(
-                currentWaypoint.getX() + 0.5,
-                currentWaypoint.getY(),
-                currentWaypoint.getZ() + 0.5
-            );
-
-            // Update aim target to new current waypoint (or visible one)
-            aimTarget = currentWaypoint;
-            visibleWaypointIndex = LineOfSightChecker.findFurthestVisibleWaypoint(
-                waypoints,
-                currentPath.getCurrentWaypointIndex(),
-                8
-            );
-            if (visibleWaypointIndex > currentPath.getCurrentWaypointIndex() &&
-                visibleWaypointIndex < waypoints.size()) {
-                aimTarget = waypoints.get(visibleWaypointIndex);
+            // Recalculate aim target for new waypoint
+            if (useLookAhead) {
+                aimTargetVec = getWeightedLookAheadTarget();
+            } else {
+                aimTargetVec = new Vec3d(
+                    currentWaypoint.getX() + 0.5,
+                    currentWaypoint.getY() + 0.5,
+                    currentWaypoint.getZ() + 0.5
+                );
             }
-
-            aimTargetVec = new Vec3d(
-                aimTarget.getX() + 0.5,
-                aimTarget.getY() + 0.5,
-                aimTarget.getZ() + 0.5
-            );
         }
 
         // Execute movement toward aim target
@@ -341,12 +350,113 @@ public class PathExecutor {
         movementState.tick();
     }
 
+    /**
+     * PHASE 2.2: Look-ahead prediction for smoother curved paths
+     * Calculates weighted average of upcoming waypoints to predict optimal aim direction
+     *
+     * Benefits:
+     * - Smoother turns around corners
+     * - More natural curved movement
+     * - Reduces "zigzag" appearance on paths
+     * - Player starts turning before reaching waypoint
+     */
+    private Vec3d getWeightedLookAheadTarget() {
+        if (mc.player == null || currentPath == null) {
+            return Vec3d.ZERO;
+        }
+
+        List<BlockPos> waypoints = currentPath.getWaypoints();
+        int currentIndex = currentPath.getCurrentWaypointIndex();
+
+        if (currentIndex >= waypoints.size()) {
+            return Vec3d.ZERO;
+        }
+
+        Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        Vec3d weightedSum = Vec3d.ZERO;
+        double totalWeight = 0.0;
+
+        // Calculate distance to current waypoint
+        BlockPos currentWaypoint = waypoints.get(currentIndex);
+        Vec3d currentWaypointVec = Vec3d.ofCenter(currentWaypoint);
+        double distToCurrent = playerPos.distanceTo(currentWaypointVec);
+
+        // Look ahead through upcoming waypoints
+        int waypointsToCheck = Math.min(LOOKAHEAD_WAYPOINTS, waypoints.size() - currentIndex);
+
+        for (int i = 0; i < waypointsToCheck; i++) {
+            int waypointIndex = currentIndex + i;
+            if (waypointIndex >= waypoints.size()) break;
+
+            BlockPos waypoint = waypoints.get(waypointIndex);
+            Vec3d waypointVec = new Vec3d(
+                waypoint.getX() + 0.5,
+                waypoint.getY() + 0.5,
+                waypoint.getZ() + 0.5
+            );
+
+            // Calculate distance from player
+            double distance = playerPos.distanceTo(waypointVec);
+
+            // Don't look too far ahead
+            if (distance > LOOKAHEAD_DISTANCE) {
+                break;
+            }
+
+            // Weight formula: closer waypoints have more influence
+            // But not TOO much - we want to look ahead for curves
+            double weight;
+            if (i == 0) {
+                // Current waypoint gets highest weight
+                weight = 3.0 / (distance + 1.0);
+            } else if (i == 1) {
+                // Next waypoint gets medium-high weight
+                weight = 2.0 / (distance + 1.0);
+            } else {
+                // Future waypoints get lower weight
+                weight = 1.0 / (distance + 1.0);
+            }
+
+            // Boost weight if we're very close to current waypoint
+            // This makes us start looking ahead sooner
+            if (i > 0 && distToCurrent < 2.0) {
+                weight *= (2.0 - distToCurrent); // 2x boost when at waypoint
+            }
+
+            weightedSum = weightedSum.add(waypointVec.multiply(weight));
+            totalWeight += weight;
+        }
+
+        // Calculate final weighted average
+        if (totalWeight > 0) {
+            Vec3d result = weightedSum.multiply(1.0 / totalWeight);
+
+            // Safety check: don't aim too far from current waypoint vertically
+            // This prevents looking too far up/down on steep paths
+            double verticalDiff = Math.abs(result.y - currentWaypointVec.y);
+            if (verticalDiff > 3.0) {
+                // Clamp vertical component
+                result = new Vec3d(
+                    result.x,
+                    currentWaypointVec.y + Math.signum(result.y - currentWaypointVec.y) * 3.0,
+                    result.z
+                );
+            }
+
+            return result;
+        }
+
+        // Fallback: just aim at current waypoint
+        return currentWaypointVec;
+    }
+
+    /**
+     * IMPROVED: Smoother movement execution with continuous rotation
+     */
     private void executeMovement(BlockPos waypoint, Vec3d waypointVec) {
         if (mc.player == null) return;
 
         movementState.setTargetPosition(waypoint);
-
-        Vec3d targetVec = waypointVec;
 
         // Handle water movement
         if (isInWater) {
@@ -370,41 +480,9 @@ public class PathExecutor {
         }
 
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
-        Vec3d directionToTarget = targetVec.subtract(playerPos).normalize();
+        Vec3d directionToTarget = waypointVec.subtract(playerPos).normalize();
 
-        // FIX: Calculate actual distance to target for proximity check
-        double distanceToTarget = playerPos.distanceTo(targetVec);
-
-        // If we're EXTREMELY close to the target (within 1 block), just move forward without rotating
-        // This prevents the circular/square aiming motion at close range
-        if (distanceToTarget < 1.0) {
-            debug("Very close to target (" + String.format("%.2f", distanceToTarget) + " blocks) - moving forward without rotation");
-
-            KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
-            KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
-
-            boolean shouldJump = shouldJump(waypoint, nextWaypoint);
-            if (shouldJump && ticksSinceLastJump >= MIN_JUMP_COOLDOWN) {
-                KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), true);
-                movementState.setAction(MovementState.Action.JUMPING);
-                ticksSinceLastJump = 0;
-            } else {
-                KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), false);
-                if (mc.player.isOnGround()) {
-                    movementState.setAction(MovementState.Action.WALKING);
-                } else {
-                    movementState.setAction(MovementState.Action.FALLING);
-                }
-            }
-
-            // No sprinting when very close
-            mc.player.setSprinting(false);
-            return; // Skip rotation logic entirely
-        }
-
-        // Calculate angle to target
+        // Calculate target angles
         double targetYaw = Math.toDegrees(Math.atan2(-directionToTarget.x, directionToTarget.z));
         float playerYaw = mc.player.getYaw();
 
@@ -413,107 +491,64 @@ public class PathExecutor {
         while (yawDiff > 180) yawDiff -= 360;
         while (yawDiff < -180) yawDiff += 360;
 
-        // Check if we need to calibrate (large angle difference)
-        boolean needsCalibration = Math.abs(yawDiff) > 60; // More than 60 degrees off
+        double absYawDiff = Math.abs(yawDiff);
 
-        if (needsCalibration && !isCalibrating) {
-            // Start calibration mode
-            isCalibrating = true;
-            calibrationTicks = 0;
-            debug("Starting calibration - angle off by " + String.format("%.1f", Math.abs(yawDiff)) + " degrees");
+        // IMPROVED: Always rotate smoothly, never stop movement
+        if (smoothRotation) {
+            RotationHelper.rotateTowardsHumanLike(waypointVec, rotationSpeed);
+        } else {
+            // Even in instant mode, use a quick rotation
+            float targetPitch = (float) Math.toDegrees(-Math.asin(directionToTarget.y));
+            mc.player.setYaw((float) targetYaw);
+            mc.player.setPitch(targetPitch);
         }
 
-        // Handle calibration mode - ONLY rotate, don't move
-        if (isCalibrating) {
-            calibrationTicks++;
+        // IMPROVED: Determine movement strategy based on angle
+        // Strategy 1: Forward movement (angle < 45°)
+        // Strategy 2: Diagonal strafing (45° - 135°)
+        // Strategy 3: Backward movement (> 135°)
 
-            // Stop all movement
-            KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
-            mc.player.setSprinting(false);
-
-            // Only rotate
-            if (smoothRotation) {
-                RotationHelper.rotateTowardsHumanLike(targetVec, rotationSpeed);
-            } else {
-                RotationHelper.faceTarget(targetVec);
-            }
-
-            // Check if calibration is complete
-            if (Math.abs(yawDiff) < CALIBRATION_ANGLE_THRESHOLD) {
-                debug("Calibration complete - angle now " + String.format("%.1f", Math.abs(yawDiff)) + " degrees");
-                isCalibrating = false;
-                calibrationTicks = 0;
-            } else if (calibrationTicks >= MAX_CALIBRATION_TICKS) {
-                debug("Calibration timeout - proceeding anyway");
-                isCalibrating = false;
-                calibrationTicks = 0;
-            }
-
-            // Don't execute movement while calibrating
-            return;
-        }
-
-        // Normal movement (when not calibrating)
-        boolean shouldRotate = Math.abs(yawDiff) > 15;
-        boolean shouldStrafe = Math.abs(yawDiff) > 45 && Math.abs(yawDiff) < 135;
-        boolean shouldMoveBackward = Math.abs(yawDiff) > 135;
-
-        if (shouldRotate && !shouldStrafe && !shouldMoveBackward) {
-            // Small angle difference - rotate and move forward
-            if (smoothRotation) {
-                RotationHelper.rotateTowardsHumanLike(targetVec, rotationSpeed);
-            } else {
-                RotationHelper.faceTarget(targetVec);
-            }
-
+        if (absYawDiff < 45) {
+            // Nearly aligned - move forward
             KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
             KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
             KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
             KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
-        } else if (shouldStrafe) {
-            // Medium angle - strafe while rotating slowly
-            if (smoothRotation) {
-                RotationHelper.rotateTowardsHumanLike(targetVec, rotationSpeed * 2);
+
+            // Sprint if moving straight and on ground
+            if (sprintEnabled && mc.player.isOnGround() && absYawDiff < 20) {
+                mc.player.setSprinting(true);
             } else {
-                RotationHelper.faceTarget(targetVec);
+                mc.player.setSprinting(false);
             }
+        } else if (absYawDiff < 135) {
+            // Medium angle - use diagonal strafing while rotating
+            mc.player.setSprinting(false);
 
             if (yawDiff > 0) {
+                // Turn left while moving forward-left
                 KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
                 KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), true);
                 KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
                 KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
             } else {
+                // Turn right while moving forward-right
                 KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
                 KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), true);
                 KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
                 KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
             }
-        } else if (shouldMoveBackward) {
+        } else {
             // Target is behind - walk backward while rotating
-            if (smoothRotation) {
-                RotationHelper.rotateTowardsHumanLike(targetVec, rotationSpeed);
-            } else {
-                RotationHelper.faceTarget(targetVec);
-            }
-
+            mc.player.setSprinting(false);
             KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), true);
             KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), false);
             KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
             KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
-        } else {
-            // Very close to target angle - just move forward
-            KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
-            KeyBinding.setKeyPressed(mc.options.backKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.leftKey.getDefaultKey(), false);
-            KeyBinding.setKeyPressed(mc.options.rightKey.getDefaultKey(), false);
         }
 
+        // Handle jumping
         boolean shouldJump = shouldJump(waypoint, nextWaypoint);
-
         if (shouldJump && ticksSinceLastJump >= MIN_JUMP_COOLDOWN) {
             KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), true);
             movementState.setAction(MovementState.Action.JUMPING);
@@ -525,14 +560,6 @@ public class PathExecutor {
             } else {
                 movementState.setAction(MovementState.Action.FALLING);
             }
-        }
-
-        // Only sprint when moving forward in straight line
-        if (sprintEnabled && mc.player.isOnGround() && !shouldJump &&
-            !shouldStrafe && !shouldMoveBackward && Math.abs(yawDiff) < 30) {
-            mc.player.setSprinting(true);
-        } else {
-            mc.player.setSprinting(false);
         }
     }
 
@@ -565,10 +592,8 @@ public class PathExecutor {
             ticksSinceLastJump = 0;
             debug("Jumping out of water");
         } else if (waypoint.getY() > playerBlockPos.getY()) {
-            // Swim upward by holding jump
             KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), true);
         } else if (waypoint.getY() < playerBlockPos.getY() && WaterPhysics.requiresDiving(mc.world, playerBlockPos)) {
-            // Dive by holding sneak
             KeyBinding.setKeyPressed(mc.options.sneakKey.getDefaultKey(), true);
         } else {
             KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), false);
@@ -582,24 +607,19 @@ public class PathExecutor {
         if (mc.player == null || mc.world == null || next == null) return false;
         if (!mc.player.isOnGround()) return false;
 
-        // Calculate horizontal gap distance
         int horizontalDist = Math.max(
             Math.abs(next.getX() - current.getX()),
             Math.abs(next.getZ() - current.getZ())
         );
 
-        // Only prepare for gaps 2+ blocks away horizontally
         if (horizontalDist < 2) return false;
 
-        // Check if there's actually a gap (air/fall)
         BlockPos between = current.offset(mc.player.getHorizontalFacing());
-
         boolean hasGap = mc.world.getBlockState(between.down()).isAir() ||
             !mc.world.getBlockState(between.down()).isSolidBlock(mc.world, between.down());
 
         if (!hasGap) return false;
 
-        // Check distance to edge
         Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
         Vec3d edgePos = Vec3d.ofCenter(current);
         double dx = playerPos.x - edgePos.x;
@@ -624,13 +644,11 @@ public class PathExecutor {
             RotationHelper.faceTarget(edgeVec);
         }
 
-        // Sprint towards edge
         KeyBinding.setKeyPressed(mc.options.forwardKey.getDefaultKey(), true);
         mc.player.setSprinting(true);
 
         gapJumpTicks++;
 
-        // Jump at the edge
         if (gapJumpTicks >= GAP_JUMP_SPRINT_TICKS || isAtEdge(edgePos)) {
             KeyBinding.setKeyPressed(mc.options.jumpKey.getDefaultKey(), true);
             ticksSinceLastJump = 0;
@@ -725,8 +743,6 @@ public class PathExecutor {
         ticksSinceLastJump = 0;
         isPreparingGapJump = false;
         gapJumpTicks = 0;
-        isCalibrating = false;
-        calibrationTicks = 0;
     }
 
     public boolean isExecuting() {
