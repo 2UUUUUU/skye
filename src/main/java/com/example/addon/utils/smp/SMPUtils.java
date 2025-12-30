@@ -191,6 +191,29 @@ public class SMPUtils {
      * @param screen The GenericContainerScreen to check
      * @return true if this is the Orders menu (contains "Page" and starts with O and has a number)
      */
+
+    public static boolean isSellMenu(GenericContainerScreen screen) {
+        if (screen == null) return false;
+
+        String title = screen.getTitle().getString();
+
+        // Check for unique Unicode characters and key words from the sell menu
+        // The title contains special small caps: ᴘʟᴀᴄᴇ, ѕᴇʟʟ
+        boolean hasPlace = title.contains("ᴘʟᴀᴄᴇ") ||
+            title.toLowerCase().contains("place");
+
+        boolean hasSell = title.contains("ѕᴇʟʟ") ||
+            title.toLowerCase().contains("sell");
+
+        boolean hasItems = title.contains("ɪᴛᴇᴍѕ") ||
+            title.toLowerCase().contains("items");
+
+        // The sell menu should have at least 2 of these keywords
+        int matches = (hasPlace ? 1 : 0) + (hasSell ? 1 : 0) + (hasItems ? 1 : 0);
+
+        return matches >= 2;
+    }
+
     public static boolean isOrdersMenu(GenericContainerScreen screen) {
         if (screen == null) return false;
 

@@ -11,6 +11,10 @@ import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.meteorclient.events.world.PlaySoundEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.entity.EntityUtils;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.entity.Entity;
@@ -179,6 +183,16 @@ public class AutoSpawnerSell extends Module {
         .name("recheck-delay-seconds").description("Delay before rechecking")
         .defaultValue(1).min(1).sliderMax(10).visible(enableSpawnerProtect::get).build());
 
+    private final Setting<Integer> maxBoneCount = sgSpawnerProtect.add(new IntSetting.Builder()
+        .name("max-bone-count")
+        .description("Sell bones once this limit is reached")
+        .defaultValue(1152)
+        .min(0)
+        .max(2176)
+        .sliderMax(2176)
+        .visible(enableSpawnerProtect::get)
+        .build());
+
     private final Setting<Boolean> enableWhitelist = sgSpawnerProtect.add(new BoolSetting.Builder()
         .name("enable-whitelist").description("Enable player whitelist")
         .defaultValue(false).visible(enableSpawnerProtect::get).build());
@@ -204,6 +218,55 @@ public class AutoSpawnerSell extends Module {
         .name("discord-id").description("Your Discord user ID")
         .defaultValue("").visible(() -> enableSpawnerProtect.get() && webhook.get() && selfPing.get()).build());
 
+    private final Setting<Boolean> showDetectionBox = sgSpawnerProtect.add(new BoolSetting.Builder()
+        .name("show-detection-box")
+        .description("Show a box around the player indicating detection range")
+        .defaultValue(true)
+        .visible(enableSpawnerProtect::get)
+        .build());
+
+    private final Setting<SettingColor> detectionBoxColor = sgSpawnerProtect.add(new ColorSetting.Builder()
+        .name("detection-box-color")
+        .description("Color of the detection range box")
+        .defaultValue(new SettingColor(255, 255, 0, 50))
+        .visible(() -> enableSpawnerProtect.get() && showDetectionBox.get())
+        .build());
+
+    private final Setting<Boolean> showEntityBox = sgSpawnerProtect.add(new BoolSetting.Builder()
+        .name("show-entity-box")
+        .description("Show a box around detected entities")
+        .defaultValue(true)
+        .visible(enableSpawnerProtect::get)
+        .build());
+
+    private final Setting<SettingColor> entityBoxColor = sgSpawnerProtect.add(new ColorSetting.Builder()
+        .name("entity-box-color")
+        .description("Color of the entity box")
+        .defaultValue(new SettingColor(255, 0, 0, 75))
+        .visible(() -> enableSpawnerProtect.get() && showEntityBox.get())
+        .build());
+
+    private final Setting<Boolean> showTracerLine = sgSpawnerProtect.add(new BoolSetting.Builder()
+        .name("show-tracer-line")
+        .description("Draw a line to detected entities")
+        .defaultValue(true)
+        .visible(enableSpawnerProtect::get)
+        .build());
+
+    private final Setting<SettingColor> tracerLineColor = sgSpawnerProtect.add(new ColorSetting.Builder()
+        .name("tracer-line-color")
+        .description("Color of the tracer line")
+        .defaultValue(new SettingColor(255, 0, 0, 255))
+        .visible(() -> enableSpawnerProtect.get() && showTracerLine.get())
+        .build());
+
+    private final Setting<ShapeMode> shapeMode = sgSpawnerProtect.add(new EnumSetting.Builder<ShapeMode>()
+        .name("shape-mode")
+        .description("How the shapes are rendered")
+        .defaultValue(ShapeMode.Both)
+        .visible(enableSpawnerProtect::get)
+        .build());
+
     // State enum
     private enum State {
         IDLE, FINDING_SPAWNER, OPENING_SPAWNER, WAITING_SPAWNER_MENU, CHECKING_SPAWNER_CONTENTS,
@@ -217,7 +280,10 @@ public class AutoSpawnerSell extends Module {
         PROTECT_OPEN_CHEST, PROTECT_DEPOSIT_BONES_TO_CHEST, PROTECT_CLOSE_CHEST,
         PROTECT_RECHECK_WAIT, PROTECT_GOING_TO_SPAWNERS, PROTECT_GOING_TO_CHEST,
         PROTECT_OPENING_CHEST, PROTECT_DEPOSITING_ITEMS, PROTECT_DISCONNECTING,
-        TELEPORT_PAUSED, TELEPORT_PAUSE_FOR_TIME, WAITING_CONFIRM_SELL_MENU, CLICK_CONFIRM_SELL,  CLICK_CONFIRM_SELL_SECOND, WAIT_AFTER_SELL_CONFIRM
+        TELEPORT_PAUSED, TELEPORT_PAUSE_FOR_TIME, WAITING_CONFIRM_SELL_MENU, CLICK_CONFIRM_SELL,
+        CLICK_CONFIRM_SELL_SECOND, WAIT_AFTER_SELL_CONFIRM,
+        PROTECT_SELLING_BONES, PROTECT_WAITING_SELL_MENU, PROTECT_DEPOSITING_TO_SELL, PROTECT_CLOSING_SELL_MENU
+
     }
 
     // Teleport Action Enum
@@ -279,6 +345,14 @@ public class AutoSpawnerSell extends Module {
     private int teleportWaitCounter = 0;
     private boolean teleportDetected = false;
 
+    // Entity detection tracking - COMPLETELY INDEPENDENT
+    private final Set<UUID> detectedEntities = new HashSet<>();
+    private final Map<UUID, Entity> currentlyDetectedEntities = new HashMap<>();
+    private Entity mostRecentDetectedEntity = null;
+    private int continuousDetectionTicks = 0;
+    private static final int DETECTION_THRESHOLD = 3; // Require 3 consecutive ticks to trigger
+    private boolean entityProtectionTriggered = false; // Track if we've already triggered protection
+
     public AutoSpawnerSell() {
         super(Main.CATEGORY, "auto-spawner-sell", "Automatically drops bones from spawner and sells them");
     }
@@ -299,6 +373,8 @@ public class AutoSpawnerSell extends Module {
         if (enableSpawnerProtect.get()) {
             info("Spawner Protection is ENABLED - monitoring for entities...");
             info("Monitoring entities: " + targetEntities.get().size() + " types");
+            info("Detection range: " + entitiesRange.get() + " blocks");
+            info("Detection uses EXACT positions (not block-aligned)");
             ChatUtils.warning("Make sure to have a silk touch pickaxe and an ender chest nearby!");
         }
     }
@@ -310,6 +386,14 @@ public class AutoSpawnerSell extends Module {
         resetProtectState();
         cleanupControls();
         SmoothAimUtils.cancelRotation();
+
+        // Clear ALL detection tracking
+        detectedEntities.clear();
+        currentlyDetectedEntities.clear();
+        mostRecentDetectedEntity = null;
+        continuousDetectionTicks = 0;
+        entityProtectionTriggered = false;
+
         info("AutoSpawnerSell deactivated");
     }
 
@@ -350,8 +434,11 @@ public class AutoSpawnerSell extends Module {
     private void onTick(TickEvent.Pre event) {
         if (mc.player == null || mc.world == null) return;
 
+        performEntityDetection();
+
+        // === SCREEN DEBUG ===
         if (mc.currentScreen instanceof GenericContainerScreen screen) {
-            if (protectTickCounter % 20 == 0) { // Log every second
+            if (protectTickCounter % 20 == 0) {
                 String title = screen.getTitle().getString();
                 var handler = screen.getScreenHandler();
                 info("=== SCREEN DEBUG ===");
@@ -362,44 +449,43 @@ public class AutoSpawnerSell extends Module {
                     info("Container Rows: " + container.getRows());
                     info("Total Slots: " + container.slots.size());
                 }
+                info("Currently Detected Entities: " + currentlyDetectedEntities.size());
+                info("Continuous Detection Ticks: " + continuousDetectionTicks);
                 info("===================");
             }
         }
 
         protectTickCounter++;
 
-        if (smoothAim.get() && SmoothAimUtils.isRotating()) {
-            SmoothAimUtils.tickRotation();
-        }
-        protectTickCounter++;
-
+        // === SMOOTH AIM ===
         if (smoothAim.get() && SmoothAimUtils.isRotating()) {
             SmoothAimUtils.tickRotation();
         }
 
+        // === TELEPORT STATES ===
         if (currentState == State.TELEPORT_PAUSED || currentState == State.TELEPORT_PAUSE_FOR_TIME) {
             handleTeleportStates();
             return;
         }
 
+        // === TELEPORT DETECTION ===
         if (checkTeleportDetection()) {
             return;
         }
 
-        if (enableSpawnerProtect.get() && !isTeleportMode() && checkForEntities()) {
-            return;
-        }
-
+        // === TRANSFER DELAY ===
         if (transferDelayCounter > 0) {
             transferDelayCounter--;
             return;
         }
 
+        // === ACTION DELAY ===
         if (delayCounter > 0) {
             delayCounter--;
             return;
         }
 
+        // === HANDLE CURRENT STATE ===
         ScreenHandler handler = mc.player.currentScreenHandler;
         handleState(handler);
     }
@@ -462,6 +548,56 @@ public class AutoSpawnerSell extends Module {
 
         lastPosition = currentPos;
         return false;
+    }
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (!enableSpawnerProtect.get() || mc.player == null) return;
+
+        if (showDetectionBox.get()) {
+            double range = entitiesRange.get();
+            Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+
+            event.renderer.box(
+                playerPos.x - range, playerPos.y - range, playerPos.z - range,
+                playerPos.x + range, playerPos.y + range, playerPos.z + range,
+                detectionBoxColor.get(),
+                detectionBoxColor.get(),
+                shapeMode.get(),
+                0
+            );
+        }
+
+        if (!currentlyDetectedEntities.isEmpty()) {
+            Vec3d playerEyePos = mc.player.getEyePos();
+
+            for (Entity entity : currentlyDetectedEntities.values()) {
+                if (entity == null || !entity.isAlive()) continue;
+
+                net.minecraft.util.math.Box entityBox = entity.getBoundingBox();
+
+                if (showEntityBox.get()) {
+                    event.renderer.box(
+                        entityBox.minX, entityBox.minY, entityBox.minZ,
+                        entityBox.maxX, entityBox.maxY, entityBox.maxZ,
+                        entityBoxColor.get(),
+                        entityBoxColor.get(),
+                        shapeMode.get(),
+                        0
+                    );
+                }
+
+                if (showTracerLine.get()) {
+                    Vec3d entityCenter = new Vec3d(entity.getX(), entity.getY() + entity.getHeight() / 2, entity.getZ());
+
+                    event.renderer.line(
+                        playerEyePos.x, playerEyePos.y, playerEyePos.z,
+                        entityCenter.x, entityCenter.y, entityCenter.z,
+                        tracerLineColor.get()
+                    );
+                }
+            }
+        }
     }
 
     private void handleTeleportDetected() {
@@ -560,6 +696,117 @@ public class AutoSpawnerSell extends Module {
         }
     }
 
+    private void performEntityDetection() {
+        if (!enableSpawnerProtect.get() || mc.player == null || mc.world == null) {
+            if (!currentlyDetectedEntities.isEmpty()) {
+                currentlyDetectedEntities.clear();
+                mostRecentDetectedEntity = null;
+                continuousDetectionTicks = 0;
+            }
+            return;
+        }
+
+        if (targetEntities.get().isEmpty()) return;
+
+        currentlyDetectedEntities.clear();
+        mostRecentDetectedEntity = null;
+
+        Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        double range = entitiesRange.get();
+
+        net.minecraft.util.math.Box detectionBox = new net.minecraft.util.math.Box(
+            playerPos.x - range, playerPos.y - range, playerPos.z - range,
+            playerPos.x + range, playerPos.y + range, playerPos.z + range
+        );
+
+        final boolean[] foundEntityThisTick = {false};
+
+        EntityUtils.intersectsWithEntity(detectionBox, entity -> {
+            if (entity == mc.player) return false;
+            if (!targetEntities.get().contains(entity.getType())) return false;
+
+            Vec3d entityPos = new Vec3d(entity.getX(), entity.getY(), entity.getZ());
+            double distanceToEntity = playerPos.distanceTo(entityPos);
+            if (distanceToEntity > range) return false;
+
+            if (entity instanceof PlayerEntity playerEntity) {
+                String playerName = SMPUtils.getPlayerName(playerEntity);
+                if (enableWhitelist.get() && SMPUtils.isPlayerWhitelisted(playerName, whitelistPlayers.get())) {
+                    return false;
+                }
+            }
+
+            currentlyDetectedEntities.put(entity.getUuid(), entity);
+
+            if (mostRecentDetectedEntity == null) {
+                mostRecentDetectedEntity = entity;
+            } else {
+                Vec3d currentEntityPos = new Vec3d(entity.getX(), entity.getY(), entity.getZ());
+                Vec3d mostRecentPos = new Vec3d(mostRecentDetectedEntity.getX(), mostRecentDetectedEntity.getY(), mostRecentDetectedEntity.getZ());
+                if (playerPos.distanceTo(currentEntityPos) < playerPos.distanceTo(mostRecentPos)) {
+                    mostRecentDetectedEntity = entity;
+                }
+            }
+
+            foundEntityThisTick[0] = true;
+            return false;
+        });
+
+        if (foundEntityThisTick[0]) {
+            continuousDetectionTicks++;
+
+            if (continuousDetectionTicks >= DETECTION_THRESHOLD &&
+                mostRecentDetectedEntity != null &&
+                !entityProtectionTriggered) {
+
+                entityProtectionTriggered = true;
+                detectedEntities.add(mostRecentDetectedEntity.getUuid());
+                triggerProtectionSequence(mostRecentDetectedEntity);
+                continuousDetectionTicks = 0;
+            }
+        } else {
+            continuousDetectionTicks = 0;
+            if (!isProtectMode() && !protectSelling) {
+                entityProtectionTriggered = false;
+            }
+        }
+    }
+
+    private void triggerProtectionSequence(Entity detectedEntity) {
+        this.detectedEntity = SMPUtils.getEntityName(detectedEntity);
+        this.detectionTime = System.currentTimeMillis();
+
+        Vec3d playerPos = new Vec3d(mc.player.getX(), mc.player.getY(), mc.player.getZ());
+        Vec3d entityPos = new Vec3d(detectedEntity.getX(), detectedEntity.getY(), detectedEntity.getZ());
+        double exactDistance = playerPos.distanceTo(entityPos);
+
+        warning("SpawnerProtect: Entity detected - " + this.detectedEntity);
+        info("Exact Distance: " + String.format("%.2f", exactDistance) + " blocks");
+        info("Entity Position: X=" + String.format("%.2f", detectedEntity.getX()) +
+            " Y=" + String.format("%.2f", detectedEntity.getY()) +
+            " Z=" + String.format("%.2f", detectedEntity.getZ()));
+        info("Player Position: X=" + String.format("%.2f", mc.player.getX()) +
+            " Y=" + String.format("%.2f", mc.player.getY()) +
+            " Z=" + String.format("%.2f", mc.player.getZ()));
+        info("Detected for " + continuousDetectionTicks + " consecutive ticks");
+        info("Current state when entity detected: " + currentState);
+        info("In menu: " + (mc.currentScreen != null));
+        info("In delay: " + (delayCounter > 0));
+        info("Protect selling: " + protectSelling);
+
+        SMPUtils.disableAutoReconnectIfEnabled(this);
+
+        if (mc.currentScreen != null) {
+            mc.player.closeHandledScreen();
+            info("Closed open screen/menu");
+        }
+
+        currentState = State.PROTECT_DETECTION_WAIT;
+        delayCounter = 3 + (int)(Math.random() * 8);
+        info("Entity detected! Starting protection sequence...");
+    }
+
+
     private Vec3d parseHomePosition() {
         String posStr = homePosition.get().trim();
         if (posStr.isEmpty()) {
@@ -612,6 +859,13 @@ public class AutoSpawnerSell extends Module {
         teleportDetected = false;
         positionBeforeTeleport = null;
         protectSelling = false;
+
+        // Clear entity detection tracking
+        detectedEntities.clear();
+        currentlyDetectedEntities.clear();
+        mostRecentDetectedEntity = null;
+        continuousDetectionTicks = 0;
+        entityProtectionTriggered = false;
     }
 
     private void cleanupControls() {
@@ -856,6 +1110,10 @@ public class AutoSpawnerSell extends Module {
             case PROTECT_OPENING_CHEST -> handleProtectOpeningChest();
             case PROTECT_DEPOSITING_ITEMS -> handleProtectDepositingItems();
             case PROTECT_DISCONNECTING -> handleProtectDisconnecting();
+            case PROTECT_SELLING_BONES -> handleProtectSellingBones();
+            case PROTECT_WAITING_SELL_MENU -> handleProtectWaitingSellMenu(handler);
+            case PROTECT_DEPOSITING_TO_SELL -> handleProtectDepositingToSell(handler);
+            case PROTECT_CLOSING_SELL_MENU -> handleProtectClosingSellMenu();
         }
     }
 
@@ -1388,10 +1646,10 @@ public class AutoSpawnerSell extends Module {
 
             info("No menu open. Bone count: " + boneCount);
 
-            if (boneCount > 1152) {
-                info("Too many bones - need to sell them first");
+            if (boneCount > maxBoneCount.get()) {
+                info("Too many bones - need to sell them first via /sell");
                 protectSelling = true;
-                currentState = State.SENDING_ORDER_COMMAND;
+                currentState = State.PROTECT_SELLING_BONES;
                 delayCounter = actionDelay.get() * 2;
             } else {
                 info("Bone count acceptable - proceeding to spawner mining");
@@ -1467,10 +1725,10 @@ public class AutoSpawnerSell extends Module {
 
         info("Total bones in inventory: " + boneCount);
 
-        // If more than 1152 bones, sell them first
-        if (boneCount > 1152) {
-            info("Too many bones (" + boneCount + ") - selling before mining spawners...");
-            currentState = State.SENDING_ORDER_COMMAND;
+        // Check against configured max bone count
+        if (boneCount > maxBoneCount.get()) {
+            info("Too many bones (" + boneCount + ") - selling via /sell before mining spawners...");
+            currentState = State.PROTECT_SELLING_BONES;
             delayCounter = actionDelay.get() * 2;
             return;
         }
@@ -1482,6 +1740,104 @@ public class AutoSpawnerSell extends Module {
         delayCounter = 0;
     }
 
+    private void handleProtectSellingBones() {
+        info("Opening /sell menu to sell bones");
+        mc.getNetworkHandler().sendChatCommand("sell");
+        currentState = State.PROTECT_WAITING_SELL_MENU;
+        delayCounter = actionDelay.get() * 2;
+    }
+
+    private void handleProtectWaitingSellMenu(ScreenHandler handler) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            info("Waiting for sell menu to open...");
+            return;
+        }
+
+        if (!(handler instanceof GenericContainerScreenHandler)) {
+            info("Not a container screen yet...");
+            return;
+        }
+
+        // Use the utility method to detect the sell menu
+        if (SMPUtils.isSellMenu(screen)) {
+            info("Sell menu detected! Title: " + screen.getTitle().getString());
+            currentState = State.PROTECT_DEPOSITING_TO_SELL;
+            delayCounter = actionDelay.get();
+        } else {
+            // Debug: show what menu we're seeing
+            String title = screen.getTitle().getString();
+            if (protectTickCounter % 10 == 0) {
+                info("Waiting for sell menu... Current title: '" + title + "'");
+            }
+        }
+    }
+
+    private void handleProtectDepositingToSell(ScreenHandler handler) {
+        if (!(handler instanceof GenericContainerScreenHandler container)) {
+            warning("Not in sell menu container!");
+            currentState = State.PROTECT_SELLING_BONES;
+            delayCounter = actionDelay.get() * 2;
+            return;
+        }
+
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            warning("Screen closed unexpectedly!");
+            currentState = State.PROTECT_SELLING_BONES;
+            delayCounter = actionDelay.get() * 2;
+            return;
+        }
+
+        int containerSlots = container.getRows() * 9;
+        int boneCount = 0;
+
+        info("=== DEPOSITING TO SELL MENU ===");
+        info("Container rows: " + container.getRows());
+        info("Total slots: " + container.slots.size());
+        info("Player inventory starts at slot: " + containerSlots);
+
+        // Count bones first
+        for (int i = containerSlots; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
+                boneCount += stack.getCount();
+            }
+        }
+
+        info("Total bones to deposit: " + boneCount);
+
+        if (boneCount == 0) {
+            warning("No bones found in inventory!");
+            currentState = State.PROTECT_CLOSING_SELL_MENU;
+            delayCounter = actionDelay.get();
+            return;
+        }
+
+        info("Depositing all bones to /sell menu at once...");
+
+        // Transfer all bones at once using QUICK_MOVE
+        for (int i = containerSlots; i < container.slots.size(); i++) {
+            ItemStack stack = container.getSlot(i).getStack();
+            if (!stack.isEmpty() && stack.getItem() == Items.BONE) {
+                info("Moving bones from slot " + i + " (count: " + stack.getCount() + ")");
+                mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+            }
+        }
+
+        info("All bones deposited to /sell menu!");
+        currentState = State.PROTECT_CLOSING_SELL_MENU;
+        delayCounter = actionDelay.get() * 2; // Give it more time to register
+    }
+
+    private void handleProtectClosingSellMenu() {
+        info("Closing /sell menu (bones will be sold automatically)");
+        mc.player.closeHandledScreen();
+
+        // Continue with spawner mining
+        info("Proceeding to spawner mining after selling bones");
+        SMPUtils.setSneaking(true, sneakingState);
+        currentState = State.PROTECT_GOING_TO_SPAWNERS;
+        delayCounter = actionDelay.get();
+    }
 
     private void handleProtectGoingToSpawners() {
         SMPUtils.setSneaking(true, sneakingState);
