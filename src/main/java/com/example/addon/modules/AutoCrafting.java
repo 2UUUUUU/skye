@@ -46,7 +46,8 @@ public class AutoCrafting extends Module {
         Items.ANVIL,
         Items.CHEST,
         Items.PISTON,
-        Items.STICKY_PISTON
+        Items.STICKY_PISTON,
+        Items.OAK_SIGN
     );
 
     // Crafting Method Enum
@@ -57,6 +58,24 @@ public class AutoCrafting extends Module {
         private final String name;
 
         CraftingMethod(String name) {
+            this.name = name;
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    // Price Mode Enum
+    public enum PriceMode {
+        FIXED("Fixed"),
+        RANDOM("Random"),
+        ADAPTIVE("Adaptive");
+
+        private final String name;
+
+        PriceMode(String name) {
             this.name = name;
         }
 
@@ -166,10 +185,79 @@ public class AutoCrafting extends Module {
         .visible(() -> craftingMethod.get() == CraftingMethod.CRAFTING_TABLE)
         .build());
 
-    private final Setting<String> itemPrice = sgItem.add(new StringSetting.Builder()
+    private final Setting<PriceMode> priceMode = sgItem.add(new EnumSetting.Builder<PriceMode>()
         .name("price")
-        .description("The price to sell the item for")
+        .description("How to determine the selling price")
+        .defaultValue(PriceMode.FIXED)
+        .onModuleActivated(setting -> {
+            if (setting.get() == null) setting.set(PriceMode.FIXED);
+        })
+        .build());
+
+    // Fixed price settings
+    private final Setting<String> fixedPrice = sgItem.add(new StringSetting.Builder()
+        .name("fixed-price")
+        .description("Fixed price to sell items for (supports K, M, B)")
         .defaultValue("1000")
+        .visible(() -> priceMode.get() == PriceMode.FIXED)
+        .build());
+
+    // Random price settings
+    private final Setting<String> minRandomPrice = sgItem.add(new StringSetting.Builder()
+        .name("min-price")
+        .description("Minimum random price")
+        .defaultValue("100")
+        .visible(() -> priceMode.get() == PriceMode.RANDOM)
+        .build());
+
+    private final Setting<String> maxRandomPrice = sgItem.add(new StringSetting.Builder()
+        .name("max-price")
+        .description("Maximum random price")
+        .defaultValue("1000")
+        .visible(() -> priceMode.get() == PriceMode.RANDOM)
+        .build());
+
+    private final Setting<Boolean> decimalRandom = sgItem.add(new BoolSetting.Builder()
+        .name("decimal")
+        .description("Allow decimal values for random prices")
+        .defaultValue(false)
+        .visible(() -> priceMode.get() == PriceMode.RANDOM)
+        .build());
+
+    // Adaptive price mode settings
+    private final Setting<Boolean> adaptiveFixed = sgItem.add(new BoolSetting.Builder()
+        .name("adaptive-fixed")
+        .description("Use the lowest price from auction house")
+        .defaultValue(true)
+        .visible(() -> priceMode.get() == PriceMode.ADAPTIVE)
+        .build());
+
+    private final Setting<Boolean> adaptiveRandom = sgItem.add(new BoolSetting.Builder()
+        .name("adaptive-random")
+        .description("Use a random price from auction house range")
+        .defaultValue(false)
+        .visible(() -> priceMode.get() == PriceMode.ADAPTIVE)
+        .build());
+
+    private final Setting<Boolean> adaptiveDecimal = sgItem.add(new BoolSetting.Builder()
+        .name("adaptive-decimal")
+        .description("Add random decimal values to the price")
+        .defaultValue(false)
+        .visible(() -> priceMode.get() == PriceMode.ADAPTIVE && adaptiveRandom.get())
+        .build());
+
+    private final Setting<String> adaptiveSubtract = sgItem.add(new StringSetting.Builder()
+        .name("adaptive-subtract")
+        .description("Amount to subtract from the fetched price (supports K, M, B)")
+        .defaultValue("0")
+        .visible(() -> priceMode.get() == PriceMode.ADAPTIVE)
+        .build());
+
+    private final Setting<Boolean> antiBait = sgItem.add(new BoolSetting.Builder()
+        .name("anti-bait")
+        .description("Ignore the first 3 items in the auction house")
+        .defaultValue(false)
+        .visible(() -> priceMode.get() == PriceMode.ADAPTIVE)
         .build());
 
     private final Setting<String> craftingAmount = sgItem.add(new StringSetting.Builder()
@@ -194,6 +282,15 @@ public class AutoCrafting extends Module {
         .min(1)
         .max(20)
         .sliderMax(20)
+        .build());
+
+    private final Setting<Integer> splittingDelay = sgItem.add(new IntSetting.Builder()
+        .name("splitting-delay")
+        .description("How fast should the items get splitted into different stacks after being crafted (in ticks)")
+        .defaultValue(3)
+        .min(1)
+        .max(300)
+        .sliderMax(300)
         .build());
 
     // Resources Settings
@@ -298,11 +395,32 @@ public class AutoCrafting extends Module {
         WAIT_FOR_CONFIRM_GUI,
         CONFIRM_LISTING,
         WAIT_AFTER_CONFIRM,
+        CHECK_REMAINING_ITEMS,
+        SEND_AH_SEARCH_COMMAND,
+        WAIT_FOR_AH_GUI,
+        PARSE_AH_PRICES,
+        CLOSE_AH_GUI,
+        MOVE_ITEMS_TO_HOTBAR,
         LOOP_DELAY,
         // Buy Order states
         SEND_ORDERS_COMMAND,
         WAIT_FOR_ORDERS_GUI,
-        VERIFY_ORDERS_GUI
+        VERIFY_ORDERS_GUI,
+        CLICK_CHEST_IN_ORDERS,
+        WAIT_FOR_YOUR_ORDERS_GUI,
+        CLICK_OAK_LOG_ORDER,
+        WAIT_FOR_EDIT_ORDER_GUI,
+        CLICK_COLLECT_CHEST,
+        COLLECT_OAK_LOGS,
+        CLOSE_BUY_ORDER_GUI,
+        // Oak Sign specific states
+        CHECK_OAK_SIGN_RESOURCES,
+        CONVERT_LOGS_TO_PLANKS,
+        WAIT_FOR_PLANKS_CRAFT,
+        TAKE_PLANKS,
+        CONVERT_PLANKS_TO_STICKS,
+        WAIT_FOR_STICKS_CRAFT,
+        TAKE_STICKS
     }
 
     private State currentState = State.IDLE;
@@ -314,6 +432,24 @@ public class AutoCrafting extends Module {
     private static final int MAX_SPLIT_ATTEMPTS = 3;
     private List<CraftingStep> currentRecipe = new ArrayList<>();
     private int recipeStep = 0;
+    private String adaptivePrice = null;
+    private boolean waitingForAuctionGui = false;
+    private int sequenceCycleCount = 0;
+    private static final int PRICE_REFRESH_CYCLES = 3;
+
+    // Oak Sign specific variables
+    private boolean needsOakPlanks = false;
+    private boolean needsSticks = false;
+    private int oakSignCheckAttempts = 0;
+    private static final int MAX_OAK_SIGN_CHECK_ATTEMPTS = 3;
+
+    // Splitting progress variables
+    private int totalStacksToCreate = 0;
+    private int stacksSplitSoFar = 0;
+    private List<Integer> sourceItemSlots = new ArrayList<>();
+    private List<Integer> targetEmptySlots = new ArrayList<>();
+    private int currentSourceSlot = -1;
+    private int itemsRemainingInCurrentSource = 0;
 
     private static class CraftingStep {
         Item item;
@@ -338,6 +474,47 @@ public class AutoCrafting extends Module {
         return Names.get(item);
     }
 
+    private String calculatePrice() {
+        switch (priceMode.get()) {
+            case FIXED -> {
+                return fixedPrice.get();
+            }
+            case RANDOM -> {
+                try {
+                    double min = Double.parseDouble(minRandomPrice.get());
+                    double max = Double.parseDouble(maxRandomPrice.get());
+
+                    if (min > max) {
+                        double temp = min;
+                        min = max;
+                        max = temp;
+                    }
+
+                    double randomValue = min + (Math.random() * (max - min));
+
+                    if (decimalRandom.get()) {
+                        return String.format("%.2f", randomValue);
+                    } else {
+                        return String.valueOf((int) Math.round(randomValue));
+                    }
+                } catch (NumberFormatException e) {
+                    error("Invalid random price values, using default 1000");
+                    return "1000";
+                }
+            }
+            case ADAPTIVE -> {
+                if (adaptivePrice == null) {
+                    error("Adaptive price not yet calculated, using default 1000");
+                    return "1000";
+                }
+                return adaptivePrice;
+            }
+            default -> {
+                return "1000";
+            }
+        }
+    }
+
     @Override
     public void onActivate() {
         currentState = State.IDLE;
@@ -352,6 +529,9 @@ public class AutoCrafting extends Module {
         resetCounters();
         cleanupControls();
         SmoothAimUtils.cancelRotation();
+        adaptivePrice = null;
+        waitingForAuctionGui = false;
+        sequenceCycleCount = 0; // Reset cycle counter
         if (mc.currentScreen != null) {
             mc.player.closeHandledScreen();
         }
@@ -381,6 +561,20 @@ public class AutoCrafting extends Module {
         splitAttempts = 0;
         currentRecipe.clear();
         recipeStep = 0;
+        needsOakPlanks = false;
+        needsSticks = false;
+        oakSignCheckAttempts = 0;
+
+        // Reset splitting variables
+        totalStacksToCreate = 0;
+        stacksSplitSoFar = 0;
+        sourceItemSlots.clear();
+        targetEmptySlots.clear();
+        currentSourceSlot = -1;
+        itemsRemainingInCurrentSource = 0;
+
+        // NOTE: Do NOT reset sequenceCycleCount here - it persists across sequences
+        // NOTE: Do NOT reset adaptivePrice here - it persists until refresh is needed
     }
 
     private void cleanupControls() {
@@ -408,16 +602,36 @@ public class AutoCrafting extends Module {
                     }
                 }
 
+                // Check if we need to fetch adaptive pricing
+                if (priceMode.get() == PriceMode.ADAPTIVE) {
+                    // Refresh price every 3 cycles or if not yet fetched
+                    if (adaptivePrice == null || sequenceCycleCount >= PRICE_REFRESH_CYCLES) {
+                        info("Adaptive pricing enabled, fetching auction house prices... (Cycle: " + sequenceCycleCount + ")");
+                        sequenceCycleCount = 0; // Reset counter
+                        adaptivePrice = null; // Clear old price
+                        currentState = State.SEND_AH_SEARCH_COMMAND;
+                        delayCounter = actionDelay.get();
+                        return;
+                    } else {
+                        info("Using cached adaptive price: " + adaptivePrice + " (Cycle: " + sequenceCycleCount + "/" + PRICE_REFRESH_CYCLES + ")");
+                    }
+                }
+
+                // Special handling for Oak Sign
+                if (item == Items.OAK_SIGN) {
+                    currentState = State.CHECK_OAK_SIGN_RESOURCES;
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+
                 // Check resources based on selected method
                 if (getResources.get() == ResourceMethod.INVENTORY) {
                     if (!hasRequiredResources(item)) {
-                        // Error message already displayed in hasRequiredResources()
                         toggle();
                         return;
                     }
                     info("All required resources found in inventory");
 
-                    // Proceed to crafting
                     if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
                         currentState = State.FIND_CRAFTING_TABLE;
                     } else {
@@ -433,6 +647,218 @@ public class AutoCrafting extends Module {
                 }
             }
 
+            case CHECK_OAK_SIGN_RESOURCES -> {
+                int oakLogs = InvUtils.find(Items.OAK_LOG).count();
+                int oakPlanks = InvUtils.find(Items.OAK_PLANKS).count();
+                int sticks = InvUtils.find(Items.STICK).count();
+
+                info("Oak Sign resource check (attempt " + (oakSignCheckAttempts + 1) + "/" + MAX_OAK_SIGN_CHECK_ATTEMPTS + ") - Logs: " + oakLogs + ", Planks: " + oakPlanks + ", Sticks: " + sticks);
+
+                // Check if we need to get resources via Buy Order
+                if (getResources.get() == ResourceMethod.BUY_ORDER && oakLogs < 2) {
+                    oakSignCheckAttempts++;
+                    if (oakSignCheckAttempts > MAX_OAK_SIGN_CHECK_ATTEMPTS) {
+                        error("ERROR: Failed to prepare Oak Sign resources after " + MAX_OAK_SIGN_CHECK_ATTEMPTS + " attempts!");
+                        toggle();
+                        return;
+                    }
+                    info("Not enough Oak Logs, using Buy Order to obtain resources");
+                    currentState = State.SEND_ORDERS_COMMAND;
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+
+                // For inventory method, check if we have enough oak logs
+                if (getResources.get() == ResourceMethod.INVENTORY && oakLogs < 2) {
+                    error("ERROR: Not enough items in inventory! Oak Logs x" + (2 - oakLogs) + " required!");
+                    toggle();
+                    return;
+                }
+
+                // Check if we need to make planks
+                if (oakPlanks < 6) {
+                    info("Need to convert Oak Logs to Oak Planks");
+                    needsOakPlanks = true;
+                    needsSticks = false; // Make sure stick flag is off
+                    oakSignCheckAttempts = 0;
+                    if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                        currentState = State.FIND_CRAFTING_TABLE;
+                    } else {
+                        currentState = State.CONVERT_LOGS_TO_PLANKS;
+                    }
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+
+                // Check if we need to make sticks
+                if (sticks < 1) {
+                    info("Need to convert Oak Planks to Sticks");
+                    needsOakPlanks = false; // Make sure plank flag is off
+                    needsSticks = true;
+                    oakSignCheckAttempts = 0;
+                    if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                        currentState = State.FIND_CRAFTING_TABLE;
+                    } else {
+                        currentState = State.CONVERT_PLANKS_TO_STICKS;
+                    }
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+
+                // All resources ready, proceed to crafting Oak Signs
+                info("All Oak Sign resources ready (Planks: " + oakPlanks + ", Sticks: " + sticks + "), proceeding to craft Oak Signs");
+                oakSignCheckAttempts = 0;
+                needsOakPlanks = false;
+                needsSticks = false;
+
+                if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                    info("Using crafting table method for Oak Signs");
+                    currentState = State.FIND_CRAFTING_TABLE;
+                } else {
+                    info("Using inventory method for Oak Signs");
+                    currentState = State.CRAFT_ITEMS;
+                }
+                delayCounter = actionDelay.get();
+            }
+
+            case CONVERT_LOGS_TO_PLANKS -> {
+                info("Converting Oak Logs to Oak Planks");
+
+                // Check if we're in the right screen for crafting table
+                if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                    if (!(mc.currentScreen instanceof CraftingScreen)) {
+                        error("ERROR: Not in crafting table screen for plank conversion!");
+                        currentState = State.FIND_CRAFTING_TABLE;
+                        delayCounter = actionDelay.get();
+                        return;
+                    }
+                }
+
+                // Place oak log in any slot of the crafting grid
+                if (placeItemInSlot(Items.OAK_LOG, 1)) {
+                    currentState = State.WAIT_FOR_PLANKS_CRAFT;
+                    delayCounter = craftingDelay.get() * 2;
+                } else {
+                    error("ERROR: Failed to place Oak Log for crafting!");
+                    toggle();
+                }
+            }
+
+            case WAIT_FOR_PLANKS_CRAFT -> {
+                info("Waiting for planks recipe to be recognized");
+                currentState = State.TAKE_PLANKS;
+                delayCounter = craftingDelay.get();
+            }
+
+            case TAKE_PLANKS -> {
+                info("Taking crafted planks");
+
+                // Shift-click the result slot to take all planks at once
+                mc.interactionManager.clickSlot(
+                    mc.player.currentScreenHandler.syncId,
+                    0, // Result slot
+                    0,
+                    SlotActionType.QUICK_MOVE,
+                    mc.player
+                );
+
+                // Check if we still have oak logs and need more planks
+                int oakLogs = InvUtils.find(Items.OAK_LOG).count();
+                int oakPlanks = InvUtils.find(Items.OAK_PLANKS).count();
+
+                info("After taking planks - Logs: " + oakLogs + ", Planks: " + oakPlanks);
+
+                if (oakPlanks < 6 && oakLogs > 0) {
+                    // Continue converting logs to planks
+                    info("Need more planks, converting another log");
+                    currentState = State.CONVERT_LOGS_TO_PLANKS;
+                    delayCounter = craftingDelay.get();
+                } else {
+                    // Done with planks, close crafting table and recheck resources
+                    info("Finished converting logs to planks, closing GUI");
+                    if (mc.currentScreen != null) {
+                        mc.player.closeHandledScreen();
+                    }
+                    needsOakPlanks = false;
+                    currentState = State.CHECK_OAK_SIGN_RESOURCES;
+                    delayCounter = actionDelay.get() * 3; // Longer delay after closing GUI
+                }
+            }
+
+            case CONVERT_PLANKS_TO_STICKS -> {
+                info("Converting Oak Planks to Sticks");
+
+                // Check if we're in the right screen for crafting table
+                if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                    if (!(mc.currentScreen instanceof CraftingScreen)) {
+                        error("ERROR: Not in crafting table screen for stick conversion!");
+                        currentState = State.FIND_CRAFTING_TABLE;
+                        delayCounter = actionDelay.get();
+                        return;
+                    }
+                }
+
+                // We need to place 2 planks vertically
+                // For crafting table: slot 1 (top) and slot 4 (middle left)
+                // For inventory: slot 1 (top) and slot 3 (bottom)
+
+                if (recipeStep == 0) {
+                    // Place first plank
+                    int firstSlot = (mc.currentScreen instanceof CraftingScreen) ? 1 : 1;
+                    if (placeItemInSlot(Items.OAK_PLANKS, firstSlot)) {
+                        info("Placed first plank for stick crafting");
+                        recipeStep++;
+                        delayCounter = craftingDelay.get();
+                    } else {
+                        error("ERROR: Failed to place first Oak Plank for stick crafting!");
+                        toggle();
+                    }
+                } else if (recipeStep == 1) {
+                    // Place second plank
+                    int secondSlot = (mc.currentScreen instanceof CraftingScreen) ? 4 : 3;
+                    if (placeItemInSlot(Items.OAK_PLANKS, secondSlot)) {
+                        info("Placed second plank for stick crafting");
+                        recipeStep = 0; // Reset for next use
+                        currentState = State.WAIT_FOR_STICKS_CRAFT;
+                        delayCounter = craftingDelay.get() * 2;
+                    } else {
+                        error("ERROR: Failed to place second Oak Plank for stick crafting!");
+                        toggle();
+                    }
+                }
+            }
+
+            case WAIT_FOR_STICKS_CRAFT -> {
+                info("Waiting for sticks recipe to be recognized");
+                currentState = State.TAKE_STICKS;
+                delayCounter = craftingDelay.get();
+            }
+
+            case TAKE_STICKS -> {
+                info("Taking crafted sticks");
+
+                // Shift-click the result slot
+                mc.interactionManager.clickSlot(
+                    mc.player.currentScreenHandler.syncId,
+                    0,
+                    0,
+                    SlotActionType.QUICK_MOVE,
+                    mc.player
+                );
+
+                int sticks = InvUtils.find(Items.STICK).count();
+                info("After taking sticks - Total sticks: " + sticks);
+
+                // Done with sticks, close crafting and recheck resources
+                info("Finished converting planks to sticks, closing GUI");
+                if (mc.currentScreen != null) {
+                    mc.player.closeHandledScreen();
+                }
+                needsSticks = false;
+                currentState = State.CHECK_OAK_SIGN_RESOURCES;
+                delayCounter = actionDelay.get() * 3; // Longer delay after closing GUI
+            }
+
             case FIND_CRAFTING_TABLE -> {
                 craftingTablePos = findNearestCraftingTable();
                 if (craftingTablePos == null) {
@@ -445,13 +871,49 @@ public class AutoCrafting extends Module {
             }
 
             case OPEN_CRAFTING_TABLE -> {
-                if (openCraftingTable(craftingTablePos)) {
-                    currentState = State.CRAFT_ITEMS;
+                // Check if the crafting table GUI has opened
+                if (mc.currentScreen instanceof CraftingScreen) {
+                    info("Crafting table GUI detected");
+
+                    // Check if we need to convert materials for Oak Sign
+                    if (needsOakPlanks) {
+                        info("Proceeding to convert logs to planks");
+                        currentState = State.CONVERT_LOGS_TO_PLANKS;
+                    } else if (needsSticks) {
+                        info("Proceeding to convert planks to sticks");
+                        currentState = State.CONVERT_PLANKS_TO_STICKS;
+                    } else {
+                        info("Proceeding to craft items");
+                        currentState = State.CRAFT_ITEMS;
+                    }
                     delayCounter = actionDelay.get();
+                    return;
+                }
+
+                // GUI not open yet, try opening it
+                String purpose = needsOakPlanks ? "for plank conversion" :
+                    (needsSticks ? "for stick conversion" : "for crafting");
+                info("Attempting to open crafting table " + purpose);
+
+                if (openCraftingTable(craftingTablePos)) {
+                    info("Sent crafting table open request, waiting for GUI...");
+                    // Stay in this state and wait for the GUI to open
+                    delayCounter = actionDelay.get() * 2; // Longer delay for GUI to open
+                } else {
+                    error("ERROR: Failed to interact with crafting table!");
+                    toggle();
                 }
             }
 
             case CRAFT_ITEMS -> {
+                // Safety check: if crafting method is CRAFTING_TABLE but we're not in the crafting GUI
+                if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE && !(mc.currentScreen instanceof CraftingScreen)) {
+                    error("ERROR: Crafting table GUI not open when it should be! Retrying...");
+                    currentState = State.FIND_CRAFTING_TABLE;
+                    delayCounter = actionDelay.get();
+                    return;
+                }
+
                 if (itemsCrafted >= targetCraftAmount) {
                     if (mc.currentScreen != null) {
                         mc.player.closeHandledScreen();
@@ -472,8 +934,9 @@ public class AutoCrafting extends Module {
                     return;
                 }
 
+                info("Starting to place items for recipe (" + currentRecipe.size() + " steps)");
                 currentState = State.PLACE_CRAFTING_ITEMS;
-                delayCounter = actionDelay.get();
+                delayCounter = craftingDelay.get(); // Add delay before starting to place items
             }
 
             case PLACE_CRAFTING_ITEMS -> {
@@ -572,13 +1035,9 @@ public class AutoCrafting extends Module {
             }
 
             case SELECT_ITEM_HOTBAR -> {
-                if (selectItemInHotbar(getSelectedItem())) {
-                    currentState = State.OPEN_INVENTORY;
-                    delayCounter = actionDelay.get();
-                } else {
-                    error("Failed to select item in hotbar!");
-                    toggle();
-                }
+                // Just open inventory, we'll handle item selection after splitting
+                currentState = State.OPEN_INVENTORY;
+                delayCounter = actionDelay.get();
             }
 
             case OPEN_INVENTORY -> {
@@ -592,33 +1051,107 @@ public class AutoCrafting extends Module {
             }
 
             case SPLIT_STACK -> {
-                if (splitStackToAmount(getSelectedItem(), sellingAmount.get())) {
+                Item item = getSelectedItem();
+                int targetAmount = sellingAmount.get();
+
+                // Initialize splitting if this is the first iteration
+                if (stacksSplitSoFar == 0 && totalStacksToCreate == 0) {
+                    if (!initializeSplitting(item, targetAmount)) {
+                        splitAttempts++;
+                        if (splitAttempts >= MAX_SPLIT_ATTEMPTS) {
+                            info("Stack splitting initialization failed after max attempts");
+                            mc.player.closeHandledScreen();
+
+                            // Check if player is holding the item in their hand
+                            ItemStack heldItem = mc.player.getMainHandStack();
+                            if (heldItem.isEmpty() || heldItem.getItem() != getSelectedItem()) {
+                                error("Player's hand is empty or holding wrong item after failed split, restarting sequence");
+                                resetCounters();
+                                currentState = State.IDLE;
+                                delayCounter = loopDelay.get();
+                            } else {
+                                info("Player is holding item, proceeding to sell anyway");
+                                currentState = State.EXECUTE_SELL_COMMAND;
+                                delayCounter = actionDelay.get();
+                            }
+                            splitAttempts = 0;
+                        } else {
+                            delayCounter = actionDelay.get();
+                        }
+                        return;
+                    }
+                    info("Initialized splitting: " + totalStacksToCreate + " stacks to create");
+                }
+
+                // Perform one split operation
+                if (stacksSplitSoFar < totalStacksToCreate) {
+                    if (performOneSplit(item, targetAmount)) {
+                        stacksSplitSoFar++;
+                        info("Split progress: " + stacksSplitSoFar + "/" + totalStacksToCreate);
+
+                        if (stacksSplitSoFar >= totalStacksToCreate) {
+                            // Done splitting
+                            info("Splitting complete!");
+                            currentState = State.CLOSE_INVENTORY;
+                            delayCounter = actionDelay.get();
+                            splitAttempts = 0;
+                        } else {
+                            // Continue splitting with delay
+                            delayCounter = splittingDelay.get();
+                        }
+                    } else {
+                        error("Failed to perform split operation");
+                        splitAttempts++;
+                        if (splitAttempts >= MAX_SPLIT_ATTEMPTS) {
+                            error("Too many split failures, aborting");
+                            resetCounters();
+                            currentState = State.IDLE;
+                            delayCounter = loopDelay.get();
+                        } else {
+                            delayCounter = splittingDelay.get();
+                        }
+                    }
+                } else {
+                    // Shouldn't reach here but handle it anyway
                     currentState = State.CLOSE_INVENTORY;
                     delayCounter = actionDelay.get();
-                    splitAttempts = 0;
-                } else {
-                    splitAttempts++;
-                    if (splitAttempts >= MAX_SPLIT_ATTEMPTS) {
-                        info("Stack splitting failed after max attempts, proceeding anyway...");
-                        currentState = State.EXECUTE_SELL_COMMAND;
-                        mc.player.closeHandledScreen();
-                        delayCounter = actionDelay.get();
-                        splitAttempts = 0;
-                    } else {
-                        delayCounter = actionDelay.get();
-                    }
                 }
             }
 
             case CLOSE_INVENTORY -> {
                 mc.player.closeHandledScreen();
+
+                // After splitting, find and select the first hotbar slot with the item
+                Item targetItem = getSelectedItem();
+                boolean foundInHotbar = false;
+
+                for (int i = 0; i < 9; i++) {
+                    ItemStack stack = mc.player.getInventory().getStack(i);
+                    if (stack.getItem() == targetItem && stack.getCount() >= sellingAmount.get()) {
+                        InvUtils.swap(i, false);
+                        info("Selected hotbar slot " + i + " with " + stack.getCount() + " items");
+                        foundInHotbar = true;
+                        break;
+                    }
+                }
+
+                if (!foundInHotbar) {
+                    error("Could not find split items in hotbar!");
+                    resetCounters();
+                    currentState = State.IDLE;
+                    delayCounter = loopDelay.get();
+                    return;
+                }
+
                 currentState = State.EXECUTE_SELL_COMMAND;
                 delayCounter = actionDelay.get();
             }
 
             case EXECUTE_SELL_COMMAND -> {
-                String command = "ah sell " + itemPrice.get();
+                String price = calculatePrice();
+                String command = "ah sell " + price;
                 mc.player.networkHandler.sendChatCommand(command);
+                info("Executing sell command with price: " + price);
                 currentState = State.WAIT_FOR_CONFIRM_GUI;
                 delayCounter = actionDelay.get() * 2;
             }
@@ -642,16 +1175,188 @@ public class AutoCrafting extends Module {
                     mc.player.closeHandledScreen();
                 }
 
-                if (hasMoreItemsToSell(getSelectedItem())) {
-                    currentState = State.OPEN_INVENTORY;
+                // Always open inventory to check for remaining items
+                currentState = State.CHECK_REMAINING_ITEMS;
+                delayCounter = actionDelay.get();
+            }
+
+            case CHECK_REMAINING_ITEMS -> {
+                if (mc.currentScreen == null) {
+                    mc.setScreen(new InventoryScreen(mc.player));
                     delayCounter = actionDelay.get();
+                    return;
+                }
+
+                Item targetItem = getSelectedItem();
+                int remainingCount = InvUtils.find(targetItem).count();
+
+                info("Checking for remaining " + getItemDisplayName(targetItem) + " - Found: " + remainingCount);
+
+                if (remainingCount >= sellingAmount.get()) {
+                    // Check if items are in hotbar or inventory
+                    boolean inHotbar = false;
+                    int hotbarSlot = -1;
+
+                    // Check hotbar (slots 36-44 in screen handler)
+                    for (int i = 36; i < 45; i++) {
+                        ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+                        if (stack.getItem() == targetItem && stack.getCount() >= sellingAmount.get()) {
+                            inHotbar = true;
+                            hotbarSlot = i;
+                            info("Found " + getItemDisplayName(targetItem) + " in hotbar slot " + i);
+                            break;
+                        }
+                    }
+
+                    if (inHotbar) {
+                        // Items already in hotbar, just close inventory and select the slot
+                        mc.player.closeHandledScreen();
+
+                        // Convert screen handler slot to inventory slot (36-44 -> 0-8)
+                        int inventoryHotbarSlot = hotbarSlot - 36;
+                        InvUtils.swap(inventoryHotbarSlot, false);
+
+                        info("Selected hotbar slot " + inventoryHotbarSlot);
+                        currentState = State.EXECUTE_SELL_COMMAND;
+                        delayCounter = actionDelay.get();
+                    } else {
+                        // Items in main inventory, need to move to hotbar
+                        info("Items found in inventory, moving to hotbar");
+                        currentState = State.MOVE_ITEMS_TO_HOTBAR;
+                        delayCounter = actionDelay.get();
+                    }
                 } else {
+                    // No more items to sell
+                    info("No more items to sell, entering loop delay");
+                    mc.player.closeHandledScreen();
                     currentState = State.LOOP_DELAY;
                     delayCounter = loopDelay.get();
                 }
             }
 
+            case MOVE_ITEMS_TO_HOTBAR -> {
+                Item targetItem = getSelectedItem();
+
+                // Find the item in main inventory (slots 9-35)
+                int sourceSlot = -1;
+                for (int i = 9; i < 36; i++) {
+                    ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+                    if (stack.getItem() == targetItem && stack.getCount() >= sellingAmount.get()) {
+                        sourceSlot = i;
+                        break;
+                    }
+                }
+
+                if (sourceSlot == -1) {
+                    error("Could not find item to move to hotbar");
+                    mc.player.closeHandledScreen();
+                    currentState = State.LOOP_DELAY;
+                    delayCounter = loopDelay.get();
+                    return;
+                }
+
+                // Find empty hotbar slot (slots 36-44)
+                int targetHotbarSlot = -1;
+                for (int i = 36; i < 45; i++) {
+                    ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+                    if (stack.isEmpty()) {
+                        targetHotbarSlot = i;
+                        break;
+                    }
+                }
+
+                if (targetHotbarSlot == -1) {
+                    // No empty slot, just use slot 36 (first hotbar slot)
+                    targetHotbarSlot = 36;
+                    info("No empty hotbar slot, using slot 36");
+                }
+
+                // Move item to hotbar
+                InvUtils.move().from(sourceSlot).to(targetHotbarSlot);
+                info("Moved item from slot " + sourceSlot + " to hotbar slot " + targetHotbarSlot);
+
+                // Close inventory and select the hotbar slot
+                mc.player.closeHandledScreen();
+
+                // Convert to inventory hotbar slot (36-44 -> 0-8)
+                int inventoryHotbarSlot = targetHotbarSlot - 36;
+                InvUtils.swap(inventoryHotbarSlot, false);
+
+                info("Selected hotbar slot " + inventoryHotbarSlot);
+                currentState = State.EXECUTE_SELL_COMMAND;
+                delayCounter = actionDelay.get();
+            }
+
+            case SEND_AH_SEARCH_COMMAND -> {
+                Item item = getSelectedItem();
+                String searchTerm;
+
+                if (item == Items.OAK_SIGN) {
+                    searchTerm = "sign";
+                } else {
+                    searchTerm = getItemDisplayName(item);
+                }
+
+                mc.player.networkHandler.sendChatCommand("ah " + searchTerm);
+                info("Sent /ah " + searchTerm + " command");
+                waitingForAuctionGui = true;
+                currentState = State.WAIT_FOR_AH_GUI;
+                delayCounter = actionDelay.get() * 3;
+            }
+
+            case WAIT_FOR_AH_GUI -> {
+                if (isAuctionGuiOpen()) {
+                    info("Auction GUI detected, parsing prices");
+                    currentState = State.PARSE_AH_PRICES;
+                    delayCounter = actionDelay.get();
+                    waitingForAuctionGui = false;
+                } else {
+                    info("Still waiting for auction GUI to open...");
+                }
+            }
+
+            case PARSE_AH_PRICES -> {
+                if (parseAuctionPrices()) {
+                    info("Successfully parsed adaptive price: " + adaptivePrice);
+                    currentState = State.CLOSE_AH_GUI;
+                    delayCounter = actionDelay.get();
+                } else {
+                    error("Failed to parse auction prices, using default 1000");
+                    adaptivePrice = "1000";
+                    currentState = State.CLOSE_AH_GUI;
+                    delayCounter = actionDelay.get();
+                }
+            }
+
+            case CLOSE_AH_GUI -> {
+                if (mc.currentScreen != null) {
+                    mc.player.closeHandledScreen();
+                }
+                info("Closed auction GUI, returning to resource check");
+
+                // Now proceed with the normal flow
+                Item item = getSelectedItem();
+                if (item == Items.OAK_SIGN) {
+                    currentState = State.CHECK_OAK_SIGN_RESOURCES;
+                } else if (getResources.get() == ResourceMethod.INVENTORY) {
+                    if (!hasRequiredResources(item)) {
+                        toggle();
+                        return;
+                    }
+                    if (craftingMethod.get() == CraftingMethod.CRAFTING_TABLE) {
+                        currentState = State.FIND_CRAFTING_TABLE;
+                    } else {
+                        currentState = State.CRAFT_ITEMS;
+                    }
+                } else if (getResources.get() == ResourceMethod.BUY_ORDER) {
+                    currentState = State.SEND_ORDERS_COMMAND;
+                }
+                delayCounter = actionDelay.get();
+            }
+
             case LOOP_DELAY -> {
+                sequenceCycleCount++; // Increment cycle counter BEFORE resetting
+                info("Completed cycle " + sequenceCycleCount + " - entering loop delay");
                 resetCounters();
                 currentState = State.IDLE;
             }
@@ -665,26 +1370,86 @@ public class AutoCrafting extends Module {
 
             case WAIT_FOR_ORDERS_GUI -> {
                 if (isOrdersGuiOpen()) {
-                    info("Orders GUI detected, verifying contents...");
-                    currentState = State.VERIFY_ORDERS_GUI;
+                    info("Orders GUI detected, clicking on chest");
+                    currentState = State.CLICK_CHEST_IN_ORDERS;
                     delayCounter = actionDelay.get();
                 } else {
                     info("Still waiting for orders GUI to open...");
                 }
             }
 
-            case VERIFY_ORDERS_GUI -> {
-                boolean itemsCorrect = verifyOrdersGuiItems();
-                boolean nameCorrect = verifyOrdersGuiName();
+            case CLICK_CHEST_IN_ORDERS -> {
+                if (clickItemInOrdersGui(Items.CHEST)) {
+                    info("Clicked chest in orders GUI, waiting for Your Orders menu");
+                    currentState = State.WAIT_FOR_YOUR_ORDERS_GUI;
+                    delayCounter = actionDelay.get() * 2;
+                } else {
+                    error("ERROR: Could not find chest in orders GUI!");
+                    toggle();
+                }
+            }
 
-                // Send verification results to chat
-                mc.player.networkHandler.sendChatMessage("Item check menu = " + itemsCorrect);
-                mc.player.networkHandler.sendChatMessage("name check menu = " + nameCorrect);
+            case WAIT_FOR_YOUR_ORDERS_GUI -> {
+                if (isYourOrdersGuiOpen()) {
+                    info("Your Orders GUI detected, clicking on Oak Log order");
+                    currentState = State.CLICK_OAK_LOG_ORDER;
+                    delayCounter = actionDelay.get();
+                } else {
+                    info("Still waiting for Your Orders GUI to open...");
+                }
+            }
 
-                info("Verification complete - Items: " + itemsCorrect + ", Name: " + nameCorrect);
+            case CLICK_OAK_LOG_ORDER -> {
+                if (clickItemInYourOrdersGui(Items.OAK_LOG)) {
+                    info("Clicked Oak Log order, waiting for Edit Order menu");
+                    currentState = State.WAIT_FOR_EDIT_ORDER_GUI;
+                    delayCounter = actionDelay.get() * 2;
+                } else {
+                    error("ERROR: Could not find Oak Log order in Your Orders GUI!");
+                    toggle();
+                }
+            }
 
-                // For now, stop here (you'll add more functionality later)
-                toggle();
+            case WAIT_FOR_EDIT_ORDER_GUI -> {
+                if (isEditOrderGuiOpen()) {
+                    info("Edit Order GUI detected, clicking on collect chest");
+                    currentState = State.CLICK_COLLECT_CHEST;
+                    delayCounter = actionDelay.get();
+                } else {
+                    info("Still waiting for Edit Order GUI to open...");
+                }
+            }
+
+            case CLICK_COLLECT_CHEST -> {
+                if (clickItemInEditOrderGui(Items.CHEST)) {
+                    info("Clicked collect chest, collecting Oak Logs");
+                    currentState = State.COLLECT_OAK_LOGS;
+                    delayCounter = actionDelay.get();
+                } else {
+                    error("ERROR: Could not find chest in Edit Order GUI!");
+                    toggle();
+                }
+            }
+
+            case COLLECT_OAK_LOGS -> {
+                if (shiftClickOakLogsInGui()) {
+                    info("Successfully collected Oak Logs, closing GUI");
+                    currentState = State.CLOSE_BUY_ORDER_GUI;
+                    delayCounter = actionDelay.get();
+                } else {
+                    info("No Oak Logs found to collect, closing GUI");
+                    currentState = State.CLOSE_BUY_ORDER_GUI;
+                    delayCounter = actionDelay.get();
+                }
+            }
+
+            case CLOSE_BUY_ORDER_GUI -> {
+                if (mc.currentScreen != null) {
+                    mc.player.closeHandledScreen();
+                }
+                info("Closed buy order GUI, returning to resource check");
+                currentState = State.CHECK_OAK_SIGN_RESOURCES;
+                delayCounter = actionDelay.get();
             }
         }
     }
@@ -791,6 +1556,11 @@ public class AutoCrafting extends Module {
         } else if (item == Items.STICKY_PISTON) {
             resources.put(Items.PISTON, 1);
             resources.put(Items.SLIME_BALL, 1);
+        } else if (item == Items.OAK_SIGN) {
+            // Oak Sign requires 6 oak planks + 1 stick
+            // But we handle this specially in CHECK_OAK_SIGN_RESOURCES
+            resources.put(Items.OAK_PLANKS, 6);
+            resources.put(Items.STICK, 1);
         }
 
         return resources;
@@ -848,6 +1618,18 @@ public class AutoCrafting extends Module {
                 steps.add(new CraftingStep(Items.SLIME_BALL, 1));
                 steps.add(new CraftingStep(Items.PISTON, 3));
             }
+        } else if (item == Items.OAK_SIGN) {
+            // Oak Sign recipe: 6 planks + 1 stick
+            // Top row: 3 planks (slots 1, 2, 3)
+            // Middle row: 3 planks (slots 4, 5, 6)
+            // Bottom row: 1 stick in center (slot 8)
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 1));
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 2));
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 3));
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 4));
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 5));
+            steps.add(new CraftingStep(Items.OAK_PLANKS, 6));
+            steps.add(new CraftingStep(Items.STICK, 8));
         }
 
         return steps;
@@ -995,102 +1777,122 @@ public class AutoCrafting extends Module {
         return false;
     }
 
-    private boolean splitStackToAmount(Item item, int targetAmount) {
+    private boolean initializeSplitting(Item item, int targetAmount) {
         if (mc.player == null || mc.interactionManager == null) return false;
         if (!(mc.currentScreen instanceof InventoryScreen)) return false;
 
-        info("Attempting to split stack to amount: " + targetAmount);
+        info("Initializing splitting for " + getItemDisplayName(item) + " into stacks of " + targetAmount);
 
-        // Find the item stack in player inventory (hotbar and main inventory)
-        int sourceSlot = -1;
-        ItemStack largestStack = ItemStack.EMPTY;
-        int largestCount = 0;
-
-        // Search through player inventory slots
-        for (int i = 9; i < 45; i++) { // Slots 9-44 are player inventory (hotbar + main)
-            ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
-            if (stack.getItem() == item && stack.getCount() > targetAmount && stack.getCount() > largestCount) {
-                sourceSlot = i;
-                largestStack = stack;
-                largestCount = stack.getCount();
-            }
-        }
-
-        if (sourceSlot == -1) {
-            info("No stack large enough to split found");
+        // Count total items
+        int totalCount = InvUtils.find(item).count();
+        if (totalCount == 0) {
+            info("No items to split");
             return false;
         }
 
-        info("Found stack of " + largestCount + " in slot " + sourceSlot);
+        // Calculate stacks to create
+        totalStacksToCreate = totalCount / targetAmount;
+        if (totalStacksToCreate == 0) {
+            info("Not enough items to create even one stack of " + targetAmount);
+            return false;
+        }
 
-        // Find an empty slot for the split
-        int emptySlot = -1;
+        // Find all item slots
+        sourceItemSlots.clear();
         for (int i = 9; i < 45; i++) {
-            if (mc.player.currentScreenHandler.getSlot(i).getStack().isEmpty()) {
-                emptySlot = i;
-                break;
+            ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+            if (stack.getItem() == item && stack.getCount() > 0) {
+                sourceItemSlots.add(i);
             }
         }
 
-        if (emptySlot == -1) {
-            info("No empty slot found for splitting");
+        if (sourceItemSlots.isEmpty()) {
+            info("No item stacks found");
             return false;
         }
 
-        info("Found empty slot at " + emptySlot);
+        // Find empty slots (hotbar first, then inventory)
+        targetEmptySlots.clear();
+        for (int i = 36; i < 45; i++) { // Hotbar
+            ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+            if (stack.isEmpty()) {
+                targetEmptySlots.add(i);
+            }
+        }
+        for (int i = 9; i < 36; i++) { // Main inventory
+            ItemStack stack = mc.player.currentScreenHandler.getSlot(i).getStack();
+            if (stack.isEmpty()) {
+                targetEmptySlots.add(i);
+            }
+        }
 
-        // Pick up the entire stack with left click
+        if (targetEmptySlots.size() < totalStacksToCreate - 1) {
+            info("Not enough empty slots (need " + (totalStacksToCreate - 1) + ", have " + targetEmptySlots.size() + ")");
+            return false;
+        }
+
+        // Initialize tracking
+        stacksSplitSoFar = 0;
+        currentSourceSlot = sourceItemSlots.get(0);
+        itemsRemainingInCurrentSource = mc.player.currentScreenHandler.getSlot(currentSourceSlot).getStack().getCount();
+
+        return true;
+    }
+
+    private boolean performOneSplit(Item item, int targetAmount) {
+        if (mc.player == null || mc.interactionManager == null) return false;
+
+        // Check if this is the last stack - if so, just leave it where it is
+        if (stacksSplitSoFar >= totalStacksToCreate - 1) {
+            info("Last stack reached, leaving it in place");
+            return true;
+        }
+
+        // Find next source slot if current one is exhausted
+        while (itemsRemainingInCurrentSource < targetAmount) {
+            int currentIndex = sourceItemSlots.indexOf(currentSourceSlot);
+            if (currentIndex + 1 >= sourceItemSlots.size()) {
+                error("Ran out of source slots unexpectedly");
+                return false;
+            }
+            currentSourceSlot = sourceItemSlots.get(currentIndex + 1);
+            itemsRemainingInCurrentSource = mc.player.currentScreenHandler.getSlot(currentSourceSlot).getStack().getCount();
+        }
+
+        // Get target slot from our list
+        int targetSlot = targetEmptySlots.get(stacksSplitSoFar);
+
+        // Pick up source stack
         mc.interactionManager.clickSlot(
             mc.player.currentScreenHandler.syncId,
-            sourceSlot,
-            0, // Left click
+            currentSourceSlot,
+            0,
             SlotActionType.PICKUP,
             mc.player
         );
 
-        info("Picked up stack from slot " + sourceSlot);
-
-        // Calculate how many items to place in the new slot
-        int itemsToPlace = targetAmount;
-
-        // Right-click to place items one at a time
-        for (int i = 0; i < itemsToPlace; i++) {
+        // Right-click to place target amount
+        for (int i = 0; i < targetAmount; i++) {
             mc.interactionManager.clickSlot(
                 mc.player.currentScreenHandler.syncId,
-                emptySlot,
-                1, // Right click to place one
+                targetSlot,
+                1,
                 SlotActionType.PICKUP,
                 mc.player
             );
         }
 
-        info("Placed " + itemsToPlace + " items in empty slot " + emptySlot);
-
-        // Place the remaining items back in the original slot
+        // Put remaining back
         mc.interactionManager.clickSlot(
             mc.player.currentScreenHandler.syncId,
-            sourceSlot,
-            0, // Left click
+            currentSourceSlot,
+            0,
             SlotActionType.PICKUP,
             mc.player
         );
 
-        info("Returned remaining items to slot " + sourceSlot);
-
-        // Make sure the split stack is now in the hotbar
-        // If emptySlot is not in hotbar (0-8), move it there
-        if (emptySlot >= 9) {
-            // Find empty hotbar slot or swap
-            for (int hotbarSlot = 36; hotbarSlot < 45; hotbarSlot++) { // Hotbar is slots 36-44 in screen handler
-                if (mc.player.currentScreenHandler.getSlot(hotbarSlot).getStack().isEmpty() ||
-                    mc.player.currentScreenHandler.getSlot(hotbarSlot).getStack().getItem() != item) {
-                    // Swap the split stack to hotbar
-                    InvUtils.move().from(emptySlot).to(hotbarSlot);
-                    info("Moved split stack from slot " + emptySlot + " to hotbar slot " + hotbarSlot);
-                    break;
-                }
-            }
-        }
+        itemsRemainingInCurrentSource -= targetAmount;
+        info("Created stack of " + targetAmount + " in slot " + targetSlot);
 
         return true;
     }
@@ -1172,59 +1974,198 @@ public class AutoCrafting extends Module {
         return handler.slots.size() == 54 + 36;
     }
 
-    private boolean verifyOrdersGuiItems() {
+    private boolean isYourOrdersGuiOpen() {
         if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        return SMPUtils.isYourOrdersMenu(screen);
+    }
+
+    private boolean isEditOrderGuiOpen() {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        return SMPUtils.isEditOrderMenu(screen);
+    }
+
+    private boolean clickItemInOrdersGui(Item targetItem) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) return false;
+
+        var handler = screen.getScreenHandler();
+        for (int i = 0; i < handler.slots.size(); i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.getItem() == targetItem) {
+                mc.interactionManager.clickSlot(
+                    handler.syncId,
+                    i,
+                    0,
+                    SlotActionType.PICKUP,
+                    mc.player
+                );
+                info("Clicked " + getItemDisplayName(targetItem) + " in slot " + i);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean clickItemInYourOrdersGui(Item targetItem) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) return false;
+
+        var handler = screen.getScreenHandler();
+        for (int i = 0; i < handler.slots.size(); i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.getItem() == targetItem) {
+                mc.interactionManager.clickSlot(
+                    handler.syncId,
+                    i,
+                    0,
+                    SlotActionType.PICKUP,
+                    mc.player
+                );
+                info("Clicked " + getItemDisplayName(targetItem) + " order in slot " + i);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean clickItemInEditOrderGui(Item targetItem) {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) return false;
+
+        var handler = screen.getScreenHandler();
+        for (int i = 0; i < handler.slots.size(); i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.getItem() == targetItem) {
+                mc.interactionManager.clickSlot(
+                    handler.syncId,
+                    i,
+                    0,
+                    SlotActionType.PICKUP,
+                    mc.player
+                );
+                info("Clicked " + getItemDisplayName(targetItem) + " in Edit Order GUI, slot " + i);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean shiftClickOakLogsInGui() {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) return false;
+
+        var handler = screen.getScreenHandler();
+
+        // Look for oak logs in the GUI and take only the FIRST stack found
+        for (int i = 0; i < handler.slots.size(); i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.getItem() == Items.OAK_LOG) {
+                mc.interactionManager.clickSlot(
+                    handler.syncId,
+                    i,
+                    0,
+                    SlotActionType.QUICK_MOVE, // Shift-click
+                    mc.player
+                );
+                info("Shift-clicked ONE Oak Log stack in slot " + i);
+                return true; // Return immediately after taking one stack
+            }
+        }
+
+        return false; // No oak logs found
+    }
+
+    private boolean isAuctionGuiOpen() {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            return false;
+        }
+
+        return SMPUtils.isAuctionMenu(screen);
+    }
+
+    private boolean parseAuctionPrices() {
+        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+            error("Not in a container screen!");
             return false;
         }
 
         var handler = screen.getScreenHandler();
+        List<Double> prices = new ArrayList<>();
 
-        // Last row: slots 45-53
-        // Pattern: empty - empty - cauldron - hopper - map - oak_sign - chest - empty - arrow
-        Item[] expectedPattern = {
-            null, // empty slot (slot 45)
-            null, // empty slot (slot 46)
-            Items.CAULDRON, // slot 47
-            Items.HOPPER, // slot 48
-            Items.MAP, // slot 49
-            Items.OAK_SIGN, // slot 50
-            Items.CHEST, // slot 51
-            null, // empty slot (slot 52)
-            Items.ARROW // slot 53
-        };
+        int startSlot = antiBait.get() ? 3 : 0;
+        int endSlot = 10; // Scan slots 0-9 (first row has 10 slots)
 
-        for (int i = 0; i < expectedPattern.length; i++) {
-            int slotIndex = 45 + i;
-            ItemStack stack = handler.getSlot(slotIndex).getStack();
+        info("Parsing auction prices from slots " + startSlot + " to " + (endSlot - 1));
 
-            if (expectedPattern[i] == null) {
-                // Expecting empty slot
-                if (!stack.isEmpty()) {
-                    return false;
-                }
-            } else {
-                // Expecting specific item
-                if (stack.isEmpty() || stack.getItem() != expectedPattern[i]) {
-                    return false;
+        for (int i = startSlot; i < endSlot; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (stack.isEmpty()) continue;
+
+            List<net.minecraft.text.Text> lore = SMPUtils.getItemLore(stack);
+            if (lore == null || lore.isEmpty()) continue;
+
+            for (net.minecraft.text.Text line : lore) {
+                String text = line.getString();
+                if (text.contains("Price:")) {
+                    String priceStr = SMPUtils.extractPrice(text);
+                    if (priceStr != null) {
+                        double priceValue = SMPUtils.parsePrice(priceStr);
+                        if (priceValue > 0) {
+                            prices.add(priceValue);
+                            info("Found price in slot " + i + ": " + priceStr);
+                        }
+                    }
+                    break;
                 }
             }
         }
 
-        return true;
-    }
-
-    private boolean verifyOrdersGuiName() {
-        if (!(mc.currentScreen instanceof GenericContainerScreen screen)) {
+        if (prices.isEmpty()) {
+            error("No prices found in auction house!");
             return false;
         }
 
-        // Use SMPUtils method for checking if this is the Orders menu
-        boolean isOrders = SMPUtils.isOrdersMenu(screen);
+        double selectedPrice;
 
-        info("Checking chest title: '" + screen.getTitle().getString() + "'");
-        info("Is Orders Menu: " + isOrders);
+        if (adaptiveFixed.get()) {
+            selectedPrice = prices.stream().min(Double::compare).orElse(1000.0);
+            info("Using lowest price: " + selectedPrice);
+        } else if (adaptiveRandom.get()) {
+            double minPrice = prices.stream().min(Double::compare).orElse(1000.0);
+            double maxPrice = prices.stream().max(Double::compare).orElse(1000.0);
+            selectedPrice = minPrice + (Math.random() * (maxPrice - minPrice));
+            info("Using random price between " + minPrice + " and " + maxPrice + ": " + selectedPrice);
 
-        return isOrders;
+            if (adaptiveDecimal.get()) {
+                double decimalAdd = Math.random() * 0.99;
+                selectedPrice += decimalAdd;
+                info("Added decimal: " + decimalAdd);
+            }
+        } else {
+            selectedPrice = prices.get(0);
+            info("Using first price: " + selectedPrice);
+        }
+
+        // Apply the adaptive subtract
+        double subtractAmount = SMPUtils.parsePrice(adaptiveSubtract.get());
+        if (subtractAmount > 0) {
+            selectedPrice -= subtractAmount;
+            info("Subtracted " + adaptiveSubtract.get() + " from price. New price: " + selectedPrice);
+
+            // Ensure price doesn't go negative
+            if (selectedPrice < 0) {
+                selectedPrice = 1.0;
+                info("Price was negative after subtraction, set to minimum: 1");
+            }
+        }
+
+        adaptivePrice = SMPUtils.formatPrice(selectedPrice, adaptiveRandom.get() && adaptiveDecimal.get());
+        return true;
     }
 
     // Helper methods to respect silent mode

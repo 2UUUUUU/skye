@@ -30,6 +30,148 @@ import java.util.List;
 
 public class SMPUtils {
 
+// ==================== AUCTION HOUSE UTILITIES ====================
+
+    /**
+     * Verifies if a chest menu matches the Auction House menu by checking the title.
+     *
+     * @param screen The GenericContainerScreen to check
+     * @return true if this is the Auction House menu
+     */
+    public static boolean isAuctionMenu(GenericContainerScreen screen) {
+        if (screen == null) return false;
+
+        String title = screen.getTitle().getString();
+
+        // Check for "auction" (may be in Unicode small caps: ᴀᴜᴄᴛɪᴏɴ)
+        boolean hasAuction = title.toLowerCase().contains("auction") ||
+            title.contains("ᴀᴜᴄᴛɪᴏɴ") ||
+            title.contains("ᴀᴜᴄᴛɪᴏ");
+
+        // Check for "Page" which indicates it's a paged GUI
+        boolean hasPage = title.contains("Page") ||
+            title.contains("page") ||
+            title.contains("ᴘᴀɢᴇ");
+
+        // The auction menu should have both keywords
+        return hasAuction && hasPage;
+    }
+
+    /**
+     * Extracts the lore (description) from an ItemStack.
+     *
+     * @param stack The ItemStack to extract lore from
+     * @return List of net.minecraft.text.Text objects representing the lore, or null if no lore exists
+     */
+    public static List<net.minecraft.text.Text> getItemLore(ItemStack stack) {
+        if (stack == null || stack.isEmpty()) return null;
+
+        var nbt = stack.getComponents();
+        if (nbt == null) return null;
+
+        // Try to get the lore component
+        var loreComponent = stack.get(net.minecraft.component.DataComponentTypes.LORE);
+        if (loreComponent == null) return null;
+
+        return loreComponent.lines();
+    }
+
+    /**
+     * Extracts the price string from a lore line containing "Price:".
+     * Example: "Price: $7k" -> "7k"
+     *
+     * @param line The text line containing the price
+     * @return The price string without the $ symbol, or null if not found
+     */
+    public static String extractPrice(String line) {
+        if (line == null || !line.contains("Price:")) return null;
+
+        // Find the price after "Price:" and "$"
+        int priceStart = line.indexOf("$");
+        if (priceStart == -1) return null;
+
+        priceStart++; // Skip the $ symbol
+
+        // Extract until we hit a space or end of string
+        StringBuilder price = new StringBuilder();
+        for (int i = priceStart; i < line.length(); i++) {
+            char c = line.charAt(i);
+            if (Character.isWhitespace(c)) break;
+            price.append(c);
+        }
+
+        return price.toString().trim();
+    }
+
+    /**
+     * Parses a price string (like "7k", "1.5M", "100") into a numeric value.
+     *
+     * @param priceStr The price string to parse
+     * @return The numeric value, or 0 if parsing fails
+     */
+    public static double parsePrice(String priceStr) {
+        if (priceStr == null || priceStr.isEmpty()) return 0;
+
+        double multiplier = 1.0;
+        String numericPart = priceStr;
+
+        // Check for suffix
+        if (priceStr.endsWith("K") || priceStr.endsWith("k")) {
+            multiplier = 1000.0;
+            numericPart = priceStr.substring(0, priceStr.length() - 1);
+        } else if (priceStr.endsWith("M") || priceStr.endsWith("m")) {
+            multiplier = 1000000.0;
+            numericPart = priceStr.substring(0, priceStr.length() - 1);
+        } else if (priceStr.endsWith("B") || priceStr.endsWith("b")) {
+            multiplier = 1000000000.0;
+            numericPart = priceStr.substring(0, priceStr.length() - 1);
+        }
+
+        try {
+            double value = Double.parseDouble(numericPart);
+            return value * multiplier;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    /**
+     * Formats a numeric price back into a string with appropriate suffix.
+     *
+     * @param price The numeric price value
+     * @param useDecimals Whether to include decimal places
+     * @return Formatted price string (e.g., "7k", "1.5M")
+     */
+    public static String formatPrice(double price, boolean useDecimals) {
+        String suffix = "";
+        double value = price;
+
+        if (price >= 1000000000.0) {
+            value = price / 1000000000.0;
+            suffix = "B";
+        } else if (price >= 1000000.0) {
+            value = price / 1000000.0;
+            suffix = "M";
+        } else if (price >= 1000.0) {
+            value = price / 1000.0;
+            suffix = "K";
+        }
+
+        if (useDecimals && !suffix.isEmpty()) {
+            return String.format("%.2f%s", value, suffix);
+        } else if (!suffix.isEmpty()) {
+            // Round to nearest integer if no decimals
+            return String.format("%d%s", (int) Math.round(value), suffix);
+        } else {
+            // For values under 1000
+            if (useDecimals) {
+                return String.format("%.2f", value);
+            } else {
+                return String.format("%d", (int) Math.round(value));
+            }
+        }
+    }
+
     // ==================== SOUND DETECTION ====================
 
     public static boolean isBlockBreakSound(String soundId) {
@@ -185,13 +327,11 @@ public class SMPUtils {
     }
 
     /**
-     * Verifies if a chest menu matches the Orders menu by checking the title.
-     * Handles Unicode small caps used in server GUIs.
+     * Verifies if a chest menu matches the Sell menu by checking for specific keywords.
      *
      * @param screen The GenericContainerScreen to check
-     * @return true if this is the Orders menu (contains "Page" and starts with O and has a number)
+     * @return true if this is the Sell menu
      */
-
     public static boolean isSellMenu(GenericContainerScreen screen) {
         if (screen == null) return false;
 
@@ -214,6 +354,13 @@ public class SMPUtils {
         return matches >= 2;
     }
 
+    /**
+     * Verifies if a chest menu matches the Orders menu by checking the title.
+     * Handles Unicode small caps used in server GUIs.
+     *
+     * @param screen The GenericContainerScreen to check
+     * @return true if this is the Orders menu (contains "Page" and starts with O and has a number)
+     */
     public static boolean isOrdersMenu(GenericContainerScreen screen) {
         if (screen == null) return false;
 
@@ -235,6 +382,57 @@ public class SMPUtils {
 
         // If it has "Page" and starts with an O character and has a number, it's the orders menu
         return hasPage && startsWithO && hasNumber;
+    }
+
+    /**
+     * Verifies if a chest menu matches the "Your Orders" submenu.
+     * This menu appears after clicking on the chest in the main Orders menu.
+     *
+     * @param screen The GenericContainerScreen to check
+     * @return true if this is the "Your Orders" menu
+     */
+    public static boolean isYourOrdersMenu(GenericContainerScreen screen) {
+        if (screen == null) return false;
+
+        String title = screen.getTitle().getString();
+
+        // Check for "orders" (may be in Unicode small caps: ᴏʀᴅᴇʀѕ)
+        boolean hasOrders = title.toLowerCase().contains("orders") ||
+            title.contains("ᴏʀᴅᴇʀѕ") ||
+            title.contains("ᴏʀᴅᴇʀ");
+
+        // Check for "Your" or Unicode equivalent (ʏᴏᴜʀ)
+        boolean hasYour = title.toLowerCase().contains("your") ||
+            title.contains("ʏᴏᴜʀ") ||
+            title.contains("ʏᴏᴜ");
+
+        // The "Your Orders" menu should have both keywords
+        return hasOrders && hasYour;
+    }
+
+    /**
+     * Verifies if a chest menu matches the "Edit Order" submenu.
+     * This menu appears after clicking on a specific order in "Your Orders".
+     *
+     * @param screen The GenericContainerScreen to check
+     * @return true if this is the "Edit Order" menu
+     */
+    public static boolean isEditOrderMenu(GenericContainerScreen screen) {
+        if (screen == null) return false;
+
+        String title = screen.getTitle().getString();
+
+        // Check for "orders" (may be in Unicode small caps: ᴏʀᴅᴇʀѕ or ᴏʀᴅᴇʀ)
+        boolean hasOrder = title.toLowerCase().contains("order") ||
+            title.contains("ᴏʀᴅᴇʀ");
+
+        // Check for "Edit" or Unicode equivalent (ᴇᴅɪᴛ)
+        boolean hasEdit = title.toLowerCase().contains("edit") ||
+            title.contains("ᴇᴅɪᴛ") ||
+            title.contains("ᴇᴅɪ");
+
+        // The "Edit Order" menu should have both keywords
+        return hasOrder && hasEdit;
     }
 
     // ==================== MOVEMENT & ROTATION ====================
