@@ -33,6 +33,37 @@ public class SMPUtils {
 // ==================== AUCTION HOUSE UTILITIES ====================
 
     /**
+     * Checks if an auction listing belongs to a specific player by examining the lore.
+     * More flexible version that checks against a single player name.
+     *
+     * @param lore The item lore to check
+     * @param playerName The player name to match against
+     * @return true if this auction belongs to the specified player
+     */
+    public static boolean isAuctionFromPlayer(List<net.minecraft.text.Text> lore, String playerName) {
+        if (lore == null || playerName == null || playerName.isEmpty()) return false;
+
+        String lowerPlayerName = playerName.toLowerCase().trim();
+
+        for (net.minecraft.text.Text line : lore) {
+            String text = line.getString();
+            // Check for "Seller: PlayerName" or similar patterns
+            if (text.contains("Seller:") || text.contains("seller:") ||
+                text.contains("ѕᴇʟʟᴇʀ:") || text.contains("SELLER:")) {
+                // Extract the seller name and compare
+                String lowerText = text.toLowerCase();
+
+                // Check if the player name appears after "seller:"
+                if (lowerText.contains(lowerPlayerName)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * Verifies if a chest menu matches the Auction House menu by checking the title.
      *
      * @param screen The GenericContainerScreen to check
@@ -133,6 +164,35 @@ public class SMPUtils {
         } catch (NumberFormatException e) {
             return 0;
         }
+    }
+
+    /**
+     * Checks if an auction listing belongs to a specific player by examining the lore.
+     *
+     * @param lore The item lore to check
+     * @param playerName The player name to match against
+     * @return true if this auction belongs to the specified player
+     */
+    public static boolean isOwnAuction(List<net.minecraft.text.Text> lore, String playerName) {
+        if (lore == null || playerName == null || playerName.isEmpty()) return false;
+
+        for (net.minecraft.text.Text line : lore) {
+            String text = line.getString();
+            // Check for "Seller: PlayerName" or similar patterns
+            if (text.contains("Seller:") || text.contains("seller:") ||
+                text.contains("ѕᴇʟʟᴇʀ:") || text.contains("SELLER:")) {
+                // Extract the seller name and compare
+                String lowerText = text.toLowerCase();
+                String lowerPlayerName = playerName.toLowerCase();
+
+                // Check if the player name appears after "seller:"
+                if (lowerText.contains(lowerPlayerName)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**
