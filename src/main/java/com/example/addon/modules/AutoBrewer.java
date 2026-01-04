@@ -216,12 +216,12 @@ public class AutoBrewer extends Module {
 
     // State management
     private enum State {
-        IDLE, WAIT_FOR_CHEST_SELECTION, OPEN_RESOURCE_CHEST, SCAN_RESOURCE_CHEST,
+        IDLE, WAIT_FOR_RESOURCE_CHEST_SELECTION, OPEN_RESOURCE_CHEST, SCAN_RESOURCE_CHEST,
         TAKE_RESOURCES_FROM_CHEST, CLOSE_RESOURCE_CHEST, FIND_BREWING_STANDS, CHECK_RESOURCES,
         FIND_WATER_SOURCE, MOVE_TO_WATER, FILL_WATER_BOTTLES, SELECT_NEXT_BREWING_STAND,
         OPEN_BREWING_STAND, WAIT_FOR_BREWING_STAND_GUI, ADD_WATER_BOTTLES, ADD_BREWING_INGREDIENT,
         CLOSE_BREWING_STAND, WAIT_FOR_BREWING, CHECK_BREWING_COMPLETION, COLLECT_POTIONS,
-        FIND_OUTPUT_CHEST, OPEN_OUTPUT_CHEST, WAIT_FOR_OUTPUT_CHEST_GUI, DEPOSIT_POTIONS,
+        WAIT_FOR_OUTPUT_CHEST_SELECTION, FIND_OUTPUT_CHEST, OPEN_OUTPUT_CHEST, WAIT_FOR_OUTPUT_CHEST_GUI, DEPOSIT_POTIONS,
         CLOSE_OUTPUT_CHEST, LOOP_DELAY
     }
 
@@ -230,12 +230,21 @@ public class AutoBrewer extends Module {
     private List<BrewingStandInfo> brewingStands = new ArrayList<>();
     private int currentBrewingStandIndex = 0;
     private int currentBrewingPhase = 0;
-    private BlockPos selectedChestPos = null;
-    private boolean waitingForChestSelection = false;
+    private BlockPos selectedResourceChestPos = null;
+    private boolean waitingForResourceChestSelection = false;
     private BlockPos waterSourcePos = null;
     private int bottleAdditionStep = 0;
     private BlockPos outputChestPos = null;
+    private boolean waitingForOutputChestSelection = false;
     private int potionsBeforeCollection = 0;
+    private Set<BlockPos> collectedBrewingStands = new HashSet<>();
+
+    // For tracking chest item transfers
+    private List<Integer> slotsToTransfer = new ArrayList<>();
+    private int currentTransferIndex = 0;
+
+    // For tracking which stand we're currently collecting from
+    private BlockPos currentlyCollectingFrom = null;
 
     private static class BrewingStandInfo {
         BlockPos pos;
@@ -356,17 +365,28 @@ public class AutoBrewer extends Module {
         brewingStands.clear();
         currentBrewingStandIndex = 0;
         currentBrewingPhase = 0;
-        selectedChestPos = null;
-        waitingForChestSelection = false;
+        selectedResourceChestPos = null;
+        waitingForResourceChestSelection = false;
         waterSourcePos = null;
         bottleAdditionStep = 0;
         outputChestPos = null;
+        waitingForOutputChestSelection = false;
         potionsBeforeCollection = 0;
+        collectedBrewingStands.clear();
+        currentlyCollectingFrom = null;
         info("AutoBrewer activated - " + potionToBrew + " (" + recipe.get() + ")");
+
+        // Check if we need to wait for resource chest selection FIRST
         if (getResources.get() == ResourceMethod.NEARBY_CHEST) {
-            currentState = State.WAIT_FOR_CHEST_SELECTION;
-            waitingForChestSelection = true;
-            info("Left-click a chest to select it as the resource chest");
+            currentState = State.WAIT_FOR_RESOURCE_CHEST_SELECTION;
+            waitingForResourceChestSelection = true;
+            info("STEP 1/2: Left-click or right-click a chest to select it as the RESOURCE chest");
+        }
+        // Check if we need to wait for output chest selection
+        else if (output.get() == OutputMethod.STORE_IN_CHEST) {
+            currentState = State.WAIT_FOR_OUTPUT_CHEST_SELECTION;
+            waitingForOutputChestSelection = true;
+            info("STEP 1/1: Left-click or right-click a chest to select it as the OUTPUT chest");
         }
     }
 
@@ -375,23 +395,54 @@ public class AutoBrewer extends Module {
         currentState = State.IDLE;
         delayCounter = 0;
         brewingStands.clear();
-        selectedChestPos = null;
-        waitingForChestSelection = false;
+        selectedResourceChestPos = null;
+        waitingForResourceChestSelection = false;
         waterSourcePos = null;
         outputChestPos = null;
+        waitingForOutputChestSelection = false;
+        collectedBrewingStands.clear();
         if (mc.currentScreen != null && mc.player != null) mc.player.closeHandledScreen();
         info("AutoBrewer deactivated");
     }
 
     @EventHandler
     private void onPacketSend(PacketEvent.Send event) {
-        if (!waitingForChestSelection) return;
         if (event.packet instanceof PlayerInteractBlockC2SPacket packet) {
             BlockPos pos = packet.getBlockHitResult().getBlockPos();
             if (mc.world != null && mc.world.getBlockState(pos).getBlock() == Blocks.CHEST) {
-                selectedChestPos = pos.toImmutable();
-                info("Chest selected at: " + selectedChestPos);
-                waitingForChestSelection = false;
+                // Handle resource chest selection
+                if (waitingForResourceChestSelection) {
+                    selectedResourceChestPos = pos.toImmutable();
+                    info("Resource chest selected at: " + selectedResourceChestPos);
+                    waitingForResourceChestSelection = false;
+                }
+                // Handle output chest selection
+                else if (waitingForOutputChestSelection) {
+                    outputChestPos = pos.toImmutable();
+                    info("Output chest selected at: " + outputChestPos);
+                    waitingForOutputChestSelection = false;
+                }
+            }
+        }
+    }
+
+    @EventHandler
+    private void onStartBreakingBlock(StartBreakingBlockEvent event) {
+        BlockPos pos = event.blockPos;
+        if (mc.world != null && mc.world.getBlockState(pos).getBlock() == Blocks.CHEST) {
+            // Handle resource chest selection
+            if (waitingForResourceChestSelection) {
+                selectedResourceChestPos = pos.toImmutable();
+                info("Resource chest selected at: " + selectedResourceChestPos);
+                waitingForResourceChestSelection = false;
+                event.cancel();
+            }
+            // Handle output chest selection
+            else if (waitingForOutputChestSelection) {
+                outputChestPos = pos.toImmutable();
+                info("Output chest selected at: " + outputChestPos);
+                waitingForOutputChestSelection = false;
+                event.cancel();
             }
         }
     }
@@ -413,25 +464,35 @@ public class AutoBrewer extends Module {
         switch (currentState) {
             case IDLE -> {
                 info("Starting brewing sequence...");
+
+                // Always find brewing stands first so we know how many we need resources for
                 currentState = State.FIND_BREWING_STANDS;
                 delayCounter = actionDelay.get();
             }
-            case WAIT_FOR_CHEST_SELECTION -> {
-                if (selectedChestPos != null) {
-                    currentState = State.OPEN_RESOURCE_CHEST;
-                    delayCounter = actionDelay.get();
+            case WAIT_FOR_RESOURCE_CHEST_SELECTION -> {
+                if (selectedResourceChestPos != null) {
+                    // After resource chest is selected, check if we also need output chest
+                    if (output.get() == OutputMethod.STORE_IN_CHEST) {
+                        currentState = State.WAIT_FOR_OUTPUT_CHEST_SELECTION;
+                        waitingForOutputChestSelection = true;
+                        info("STEP 2/2: Left-click or right-click a chest to select it as the OUTPUT chest");
+                        delayCounter = 10;
+                    } else {
+                        currentState = State.OPEN_RESOURCE_CHEST;
+                        delayCounter = actionDelay.get();
+                    }
                 }
             }
             case OPEN_RESOURCE_CHEST -> {
-                if (!canReachBlock(selectedChestPos)) {
-                    error("Resource chest at " + selectedChestPos + " is out of reach or blocked!");
+                if (!canReachBlock(selectedResourceChestPos)) {
+                    error("Resource chest at " + selectedResourceChestPos + " is out of reach or blocked!");
                     toggle();
                     return;
                 }
-                info("Opening resource chest at " + selectedChestPos);
-                if (openChestRaytraced(selectedChestPos)) {
+                info("Opening resource chest at " + selectedResourceChestPos);
+                if (openChestRaytraced(selectedResourceChestPos)) {
                     currentState = State.SCAN_RESOURCE_CHEST;
-                    delayCounter = actionDelay.get() * 2;
+                    delayCounter = actionDelay.get() * 3; // Increased delay to ensure GUI is loaded
                 } else {
                     error("Failed to open resource chest!");
                     toggle();
@@ -440,9 +501,10 @@ public class AutoBrewer extends Module {
             case SCAN_RESOURCE_CHEST -> {
                 if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen) {
                     info("Scanning resource chest for required items...");
-                    if (scanAndTakeResourcesFromChest()) {
-                        info("Successfully took resources from chest");
-                        currentState = State.CLOSE_RESOURCE_CHEST;
+                    if (scanResourceChestAndBuildTransferList()) {
+                        info("Found all required items, starting transfers...");
+                        currentTransferIndex = 0;
+                        currentState = State.TAKE_RESOURCES_FROM_CHEST;
                         delayCounter = brewingDelay.get();
                     } else {
                         error("Failed to find all required resources in chest!");
@@ -450,35 +512,145 @@ public class AutoBrewer extends Module {
                         delayCounter = brewingDelay.get();
                     }
                 } else {
-                    info("Waiting for chest GUI to open...");
-                    delayCounter = 5;
+                    info("Waiting for chest GUI to open... (attempt " + (40 - delayCounter) + ")");
+                    if (delayCounter <= 0) {
+                        error("Chest GUI never opened! Timeout.");
+                        currentState = State.CLOSE_RESOURCE_CHEST;
+                        delayCounter = brewingDelay.get();
+                    } else {
+                        delayCounter = 10; // Keep waiting
+                    }
                 }
+            }
+            case TAKE_RESOURCES_FROM_CHEST -> {
+                if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen screen)) {
+                    error("Lost chest GUI during transfer!");
+                    currentState = State.CLOSE_RESOURCE_CHEST;
+                    delayCounter = brewingDelay.get();
+                    return;
+                }
+
+                if (currentTransferIndex >= slotsToTransfer.size()) {
+                    info("All items transferred!");
+                    currentState = State.CLOSE_RESOURCE_CHEST;
+                    delayCounter = brewingDelay.get();
+                    return;
+                }
+
+                var handler = screen.getScreenHandler();
+                int slot = slotsToTransfer.get(currentTransferIndex);
+                ItemStack stack = handler.getSlot(slot).getStack();
+
+                if (!stack.isEmpty()) {
+                    Item item = stack.getItem();
+                    int count = stack.getCount();
+
+                    // Determine how many to take: 3 for bottles, 1 for everything else
+                    boolean isBottle = (item == Items.POTION || item == Items.GLASS_BOTTLE);
+                    int amountToTake = isBottle ? Math.min(3, count) : 1;
+
+                    info("Transferring " + (currentTransferIndex + 1) + "/" + slotsToTransfer.size() + ": " + amountToTake + "x " + Names.get(item) + " from slot " + slot);
+
+                    if (mc.interactionManager != null && mc.player != null) {
+                        int containerSlots = handler.getRows() * 9;
+
+                        // Find an empty slot or matching stack in player inventory
+                        int targetSlot = -1;
+                        for (int i = containerSlots; i < handler.slots.size(); i++) {
+                            ItemStack invStack = handler.getSlot(i).getStack();
+                            if (invStack.isEmpty()) {
+                                targetSlot = i;
+                                break;
+                            }
+                        }
+
+                        if (targetSlot == -1) {
+                            error("No empty slot in inventory!");
+                            currentTransferIndex++;
+                            delayCounter = brewingDelay.get();
+                            return;
+                        }
+
+                        if (isBottle && count >= 3) {
+                            // For bottles: take exactly 3
+                            // Method: Left-click to pick up all, then right-click target 3 times to place 3
+                            mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
+
+                            // Right-click target slot 3 times to place 1 each time = 3 total
+                            for (int i = 0; i < 3; i++) {
+                                mc.interactionManager.clickSlot(handler.syncId, targetSlot, 1, SlotActionType.PICKUP, mc.player);
+                            }
+
+                            // Put the rest back in the chest slot
+                            mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
+                        } else if (!isBottle && count > 1) {
+                            // For single items from a stack: take exactly 1
+                            // Method: Left-click to pick up all, right-click target once to place 1, put rest back
+                            mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
+
+                            // Right-click once to place 1 item
+                            mc.interactionManager.clickSlot(handler.syncId, targetSlot, 1, SlotActionType.PICKUP, mc.player);
+
+                            // Put the rest back
+                            mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
+                        } else {
+                            // Stack has exactly what we need (1 item, or 3 bottles) - take it all
+                            mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.PICKUP, mc.player);
+                            mc.interactionManager.clickSlot(handler.syncId, targetSlot, 0, SlotActionType.PICKUP, mc.player);
+                        }
+                    }
+                }
+
+                currentTransferIndex++;
+                delayCounter = brewingDelay.get();
             }
             case CLOSE_RESOURCE_CHEST -> {
                 if (mc.currentScreen != null && mc.player != null) {
                     mc.player.closeHandledScreen();
                 }
                 info("Closed resource chest");
-                currentState = State.FIND_BREWING_STANDS;
+                currentState = State.CHECK_RESOURCES;
                 delayCounter = actionDelay.get();
             }
             case FIND_BREWING_STANDS -> {
                 info("Finding brewing stands...");
-                brewingStands = findBrewingStands();
+                List<BrewingStandInfo> foundStands = findBrewingStands();
                 int requestedAmount = brewingStandsAmount.get();
-                if (brewingStands.isEmpty()) {
+
+                info("DEBUG: Found " + foundStands.size() + " total stands within range");
+                info("DEBUG: Requested amount: " + requestedAmount);
+
+                if (foundStands.isEmpty()) {
                     error("No brewing stands found nearby!");
                     toggle();
                     return;
-                } else if (brewingStands.size() < requestedAmount) {
-                    info("Found " + brewingStands.size() + " brewing stands (requested: " + requestedAmount + ")");
+                } else if (foundStands.size() < requestedAmount) {
+                    info("Found " + foundStands.size() + " brewing stands (requested: " + requestedAmount + ")");
+                    brewingStands = new ArrayList<>(foundStands); // Use all found stands
                 } else {
-                    brewingStands = brewingStands.subList(0, requestedAmount);
+                    // Create a new list with only the requested amount
+                    brewingStands = new ArrayList<>();
+                    for (int i = 0; i < requestedAmount; i++) {
+                        brewingStands.add(foundStands.get(i));
+                    }
                     info("Using " + brewingStands.size() + " brewing stands");
                 }
+
+                info("DEBUG: brewingStands.size() after assignment: " + brewingStands.size());
+                info("DEBUG: Listing all selected stands:");
+                for (int i = 0; i < brewingStands.size(); i++) {
+                    info("  Stand " + (i + 1) + ": " + brewingStands.get(i).pos);
+                }
+
                 currentBrewingStandIndex = 0;
                 currentBrewingPhase = 0;
-                currentState = State.CHECK_RESOURCES;
+
+                // Now that we know how many stands we have, check if we need to get resources from chest
+                if (getResources.get() == ResourceMethod.NEARBY_CHEST && selectedResourceChestPos != null) {
+                    currentState = State.OPEN_RESOURCE_CHEST;
+                } else {
+                    currentState = State.CHECK_RESOURCES;
+                }
                 delayCounter = actionDelay.get();
             }
             case CHECK_RESOURCES -> {
@@ -556,22 +728,27 @@ public class AutoBrewer extends Module {
                 }
             }
             case SELECT_NEXT_BREWING_STAND -> {
+                info("DEBUG: Selecting next brewing stand. Current index: " + currentBrewingStandIndex + ", Total stands: " + brewingStands.size());
+
                 BrewingStandInfo nextStand = null;
                 int startIndex = currentBrewingStandIndex;
                 do {
                     BrewingStandInfo stand = brewingStands.get(currentBrewingStandIndex);
+                    info("DEBUG: Checking stand " + (currentBrewingStandIndex + 1) + " at " + stand.pos + " - cooldown: " + stand.cooldownTicks + ", reachable: " + canReachBlock(stand.pos));
+
                     if (stand.cooldownTicks == 0 && canReachBlock(stand.pos)) {
                         nextStand = stand;
                         break;
                     }
                     currentBrewingStandIndex = (currentBrewingStandIndex + 1) % brewingStands.size();
                 } while (currentBrewingStandIndex != startIndex);
+
                 if (nextStand == null) {
                     info("All brewing stands are busy or unreachable, waiting...");
                     delayCounter = 20;
                     return;
                 }
-                info("Selected brewing stand " + (currentBrewingStandIndex + 1) + "/" + brewingStands.size());
+                info("Selected brewing stand " + (currentBrewingStandIndex + 1) + "/" + brewingStands.size() + " at " + nextStand.pos);
                 currentState = State.OPEN_BREWING_STAND;
                 delayCounter = actionDelay.get();
             }
@@ -653,6 +830,7 @@ public class AutoBrewer extends Module {
 
                 if (allComplete) {
                     info("All brewing stands have completed all phases! Waiting for brewing to finish...");
+                    collectedBrewingStands.clear(); // Reset collected stands tracker
                     currentState = State.WAIT_FOR_BREWING;
                     delayCounter = 420; // Wait for brewing (20 seconds)
                 } else {
@@ -666,40 +844,51 @@ public class AutoBrewer extends Module {
                 delayCounter = actionDelay.get();
             }
             case COLLECT_POTIONS -> {
-                // Count potions before opening brewing stand
-                Item targetItem = recipe.get().getResultItem();
-                potionsBeforeCollection = InvUtils.find(targetItem).count();
-
-                info("Collecting potions from brewing stands (currently have " + potionsBeforeCollection + " potions)");
-
-                // Find first brewing stand that's reachable and has finished brewing
+                // Find first brewing stand that hasn't been collected yet
                 BrewingStandInfo standToCollect = null;
                 for (BrewingStandInfo stand : brewingStands) {
-                    if (stand.cooldownTicks == 0 && canReachBlock(stand.pos)) {
+                    if (!collectedBrewingStands.contains(stand.pos) && stand.cooldownTicks == 0 && canReachBlock(stand.pos)) {
                         standToCollect = stand;
                         break;
                     }
                 }
 
                 if (standToCollect == null) {
-                    info("All potions collected or no reachable stands!");
-                    if (output.get() == OutputMethod.STORE_IN_CHEST) {
+                    info("All potions collected from brewing stands!");
+
+                    // Check if we need to store in chest (and chest was already selected at start)
+                    if (output.get() == OutputMethod.STORE_IN_CHEST && outputChestPos != null) {
                         currentState = State.FIND_OUTPUT_CHEST;
                         delayCounter = actionDelay.get();
+                    } else if (output.get() == OutputMethod.STORE_IN_CHEST && outputChestPos == null) {
+                        error("Output chest was not selected! Skipping storage.");
+                        currentState = State.LOOP_DELAY;
+                        delayCounter = loopDelay.get();
                     } else {
+                        // Skip to loop delay if not storing in chest
                         currentState = State.LOOP_DELAY;
                         delayCounter = loopDelay.get();
                     }
                     return;
                 }
 
-                info("Opening brewing stand to collect potions");
+                // Count potions before opening brewing stand
+                Item targetItem = recipe.get().getResultItem();
+                potionsBeforeCollection = InvUtils.find(targetItem).count();
+
+                // Track which stand we're currently collecting from
+                currentlyCollectingFrom = standToCollect.pos;
+
+                info("Collecting potions from brewing stand at " + standToCollect.pos + " (currently have " + potionsBeforeCollection + " potions)");
+
                 if (openBrewingStandRaytraced(standToCollect.pos)) {
                     currentState = State.CHECK_BREWING_COMPLETION;
                     delayCounter = actionDelay.get() * 2;
                 } else {
                     error("Failed to open brewing stand for collection!");
-                    currentState = State.FIND_OUTPUT_CHEST;
+                    // Mark as collected anyway to avoid infinite loop
+                    collectedBrewingStands.add(standToCollect.pos);
+                    currentlyCollectingFrom = null;
                     delayCounter = actionDelay.get();
                 }
             }
@@ -725,42 +914,53 @@ public class AutoBrewer extends Module {
 
                     if (!hasFinishedPotions) {
                         info("No more potions to collect from this stand");
-                        // Close GUI and mark this stand as collected
+                        // Close GUI
                         mc.player.closeHandledScreen();
 
-                        // Mark the current stand as done
-                        for (BrewingStandInfo stand : brewingStands) {
-                            if (mc.currentScreen == null) {
-                                // We just closed the screen, so check if potions increased
-                                Item checkItem = recipe.get().getResultItem();
-                                int potionsAfter = InvUtils.find(checkItem).count();
-
-                                if (potionsAfter > potionsBeforeCollection) {
-                                    info("Successfully collected " + (potionsAfter - potionsBeforeCollection) + " potions!");
-                                    potionsBeforeCollection = potionsAfter;
-                                }
-
-                                // Go back to collect from next stand
-                                currentState = State.COLLECT_POTIONS;
-                                delayCounter = actionDelay.get();
-                                return;
-                            }
+                        // Mark the stand we're currently collecting from as collected
+                        if (currentlyCollectingFrom != null) {
+                            collectedBrewingStands.add(currentlyCollectingFrom);
+                            info("Marked stand at " + currentlyCollectingFrom + " as collected");
+                            currentlyCollectingFrom = null;
                         }
+
+                        // Check if potions increased
+                        Item checkItem = recipe.get().getResultItem();
+                        int potionsAfter = InvUtils.find(checkItem).count();
+
+                        if (potionsAfter > potionsBeforeCollection) {
+                            info("Successfully collected " + (potionsAfter - potionsBeforeCollection) + " potions!");
+                        }
+
+                        // Go back to collect from next stand
+                        currentState = State.COLLECT_POTIONS;
+                        delayCounter = actionDelay.get();
                     }
                 } else {
                     info("Waiting for brewing stand GUI...");
                     delayCounter = 5;
                 }
             }
-            case FIND_OUTPUT_CHEST -> {
-                info("Finding output chest...");
-                outputChestPos = findNearestOutputChest();
-                if (outputChestPos == null) {
-                    error("No output chest found within range!");
-                    currentState = State.LOOP_DELAY;
-                    delayCounter = loopDelay.get();
-                    return;
+            case WAIT_FOR_OUTPUT_CHEST_SELECTION -> {
+                if (outputChestPos != null) {
+                    info("Output chest saved! Starting brewing sequence...");
+                    // Always find brewing stands first to know how many we have
+                    currentState = State.FIND_BREWING_STANDS;
+                    delayCounter = actionDelay.get();
                 }
+            }
+            case FIND_OUTPUT_CHEST -> {
+                if (outputChestPos == null) {
+                    info("Finding output chest...");
+                    outputChestPos = findNearestOutputChest();
+                    if (outputChestPos == null) {
+                        error("No output chest found within range!");
+                        currentState = State.LOOP_DELAY;
+                        delayCounter = loopDelay.get();
+                        return;
+                    }
+                }
+
                 if (!canReachBlock(outputChestPos)) {
                     error("Output chest at " + outputChestPos + " is out of reach or blocked!");
                     currentState = State.LOOP_DELAY;
@@ -837,8 +1037,14 @@ public class AutoBrewer extends Module {
                     stand.cooldownTicks = 0;
                     stand.isActive = false;
                 }
+                collectedBrewingStands.clear();
                 currentBrewingStandIndex = 0;
                 currentBrewingPhase = 0;
+                currentlyCollectingFrom = null;
+                // DO NOT reset outputChestPos - it should persist across cycles!
+                // DO NOT reset selectedResourceChestPos - it should persist across cycles!
+                waitingForOutputChestSelection = false;
+                waitingForResourceChestSelection = false;
                 currentState = State.IDLE;
             }
         }
@@ -984,8 +1190,11 @@ public class AutoBrewer extends Module {
         return false;
     }
 
-    private boolean scanAndTakeResourcesFromChest() {
-        if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen screen)) return false;
+    private boolean scanResourceChestAndBuildTransferList() {
+        if (!(mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen screen)) {
+            error("Not a chest screen!");
+            return false;
+        }
 
         var handler = screen.getScreenHandler();
         Item[] phases = getBrewingPhases();
@@ -993,48 +1202,159 @@ public class AutoBrewer extends Module {
 
         Map<Item, Integer> requiredItems = new HashMap<>();
 
+        // Add all brewing phase ingredients
         for (Item ingredient : phases) {
             requiredItems.put(ingredient, requiredItems.getOrDefault(ingredient, 0) + standsCount);
         }
 
-        requiredItems.put(Items.POTION, standsCount * 3);
+        // For bottles: we need 3 per stand, but accept EITHER water bottles OR empty bottles
+        int requiredBottles = standsCount * 3;
+
+        // Add blaze powder for fuel
         requiredItems.put(Items.BLAZE_POWDER, standsCount);
 
+        // Calculate container slots (chest slots, not player inventory)
+        int totalSlots = handler.slots.size();
         int containerSlots = handler.getRows() * 9;
-        boolean foundAll = true;
 
-        info("Required items:");
+        info("=== CHEST SCAN DEBUG ===");
+        info("Total slots: " + totalSlots);
+        info("Container slots (chest): " + containerSlots);
+        info("Player inventory starts at slot: " + containerSlots);
+
+        info("");
+        info("=== Required items for " + standsCount + " brewing stand(s) ===");
         for (Map.Entry<Item, Integer> entry : requiredItems.entrySet()) {
             info("  - " + Names.get(entry.getKey()) + " x" + entry.getValue());
         }
+        info("  - Water Bottles OR Glass Bottles x" + requiredBottles);
+
+        // Scan ONLY the chest slots (not player inventory)
+        info("");
+        info("=== Scanning chest contents (slots 0-" + (containerSlots - 1) + ") ===");
+        Map<Item, Integer> availableItems = new HashMap<>();
+
+        for (int slot = 0; slot < containerSlots; slot++) {
+            ItemStack stack = handler.getSlot(slot).getStack();
+            if (!stack.isEmpty()) {
+                Item item = stack.getItem();
+                String itemName = Names.get(item);
+                int count = stack.getCount();
+
+                info("  Slot " + slot + ": " + itemName + " x" + count);
+                availableItems.put(item, availableItems.getOrDefault(item, 0) + count);
+            }
+        }
+
+        if (availableItems.isEmpty()) {
+            error("Chest appears to be empty or items not detected!");
+            return false;
+        }
+
+        info("");
+        info("=== Total items found in chest ===");
+        for (Map.Entry<Item, Integer> entry : availableItems.entrySet()) {
+            info("  - " + Names.get(entry.getKey()) + " x" + entry.getValue());
+        }
+
+        // Check bottles specially - accept either water bottles OR glass bottles
+        int waterBottles = availableItems.getOrDefault(Items.POTION, 0);
+        int glassBottles = availableItems.getOrDefault(Items.GLASS_BOTTLE, 0);
+        int totalBottles = waterBottles + glassBottles;
+
+        // Check if we have everything we need
+        info("");
+        info("=== Checking requirements ===");
+        boolean foundAll = true;
 
         for (Map.Entry<Item, Integer> entry : requiredItems.entrySet()) {
             Item item = entry.getKey();
             int needed = entry.getValue();
-            int found = 0;
+            int available = availableItems.getOrDefault(item, 0);
 
-            for (int slot = 0; slot < containerSlots; slot++) {
-                ItemStack stack = handler.getSlot(slot).getStack();
-                if (stack.getItem() == item) {
-                    int toTake = Math.min(needed - found, stack.getCount());
+            String status = available >= needed ? "✓ OK" : "✗ MISSING";
+            info("  " + status + " " + Names.get(item) + ": have " + available + ", need " + needed);
 
-                    if (toTake > 0) {
-                        mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.QUICK_MOVE, mc.player);
-                        found += toTake;
-                        info("Taking " + toTake + "x " + Names.get(item) + " from chest");
-                    }
-
-                    if (found >= needed) break;
-                }
-            }
-
-            if (found < needed) {
-                error("Only found " + found + "/" + needed + " of " + Names.get(item));
+            if (available < needed) {
                 foundAll = false;
             }
         }
 
-        return foundAll;
+        // Check bottles
+        String bottleStatus = totalBottles >= requiredBottles ? "✓ OK" : "✗ MISSING";
+        info("  " + bottleStatus + " Bottles (water or glass): have " + totalBottles + " (" + waterBottles + " water + " + glassBottles + " empty), need " + requiredBottles);
+        if (totalBottles < requiredBottles) {
+            foundAll = false;
+        }
+
+        if (!foundAll) {
+            error("Not all required items are available in the chest!");
+            return false;
+        }
+
+        // Now BUILD THE LIST of individual item transfers (ONE item at a time, except bottles = 3)
+        info("");
+        info("=== Building transfer list ===");
+
+        slotsToTransfer.clear();
+        Map<Item, Integer> itemsLeftToTake = new HashMap<>(requiredItems);
+        int bottlesLeftToTake = requiredBottles;
+
+        // For bottles, we take them in groups of 3
+        while (bottlesLeftToTake > 0) {
+            int toTakeThisTime = Math.min(3, bottlesLeftToTake);
+
+            // Try to find water bottles first
+            boolean found = false;
+            for (int slot = 0; slot < containerSlots; slot++) {
+                ItemStack stack = handler.getSlot(slot).getStack();
+                if (!stack.isEmpty() && stack.getItem() == Items.POTION) {
+                    slotsToTransfer.add(slot); // Will take 3 from this slot
+                    info("  Queued: Take 3x Water Bottle from slot " + slot);
+                    found = true;
+                    break;
+                }
+            }
+
+            // If no water bottles, try glass bottles
+            if (!found) {
+                for (int slot = 0; slot < containerSlots; slot++) {
+                    ItemStack stack = handler.getSlot(slot).getStack();
+                    if (!stack.isEmpty() && stack.getItem() == Items.GLASS_BOTTLE) {
+                        slotsToTransfer.add(slot); // Will take 3 from this slot
+                        info("  Queued: Take 3x Glass Bottle from slot " + slot);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) break;
+            bottlesLeftToTake -= toTakeThisTime;
+        }
+
+        // For other ingredients, take ONE at a time
+        for (Map.Entry<Item, Integer> entry : itemsLeftToTake.entrySet()) {
+            Item item = entry.getKey();
+            int needed = entry.getValue();
+
+            for (int i = 0; i < needed; i++) {
+                // Find a slot with this item
+                for (int slot = 0; slot < containerSlots; slot++) {
+                    ItemStack stack = handler.getSlot(slot).getStack();
+                    if (!stack.isEmpty() && stack.getItem() == item) {
+                        slotsToTransfer.add(slot); // Will take 1 from this slot
+                        info("  Queued: Take 1x " + Names.get(item) + " from slot " + slot);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info("");
+        info("✓ Transfer list built: " + slotsToTransfer.size() + " transfers queued");
+
+        return true;
     }
 
     private boolean addWaterBottlesToBrewingStandOneByOne() {
@@ -1065,15 +1385,11 @@ public class AutoBrewer extends Module {
 
         if (bottleAdditionStep == 3) {
             ItemStack fuelStack = handler.getSlot(4).getStack();
-            if (fuelStack.isEmpty() || fuelStack.getItem() != Items.BLAZE_POWDER) {
-                int blazePowderSlot = findItemInInventory(Items.BLAZE_POWDER);
-                if (blazePowderSlot != -1) {
-                    mc.interactionManager.clickSlot(handler.syncId, blazePowderSlot, 0, SlotActionType.PICKUP, mc.player);
-                    mc.interactionManager.clickSlot(handler.syncId, 4, 1, SlotActionType.PICKUP, mc.player);
-                    mc.interactionManager.clickSlot(handler.syncId, blazePowderSlot, 0, SlotActionType.PICKUP, mc.player);
-
-                    info("Added blaze powder as fuel");
-                }
+            // Always add blaze powder using shift-click to stack with existing fuel
+            int blazePowderSlot = findItemInInventory(Items.BLAZE_POWDER);
+            if (blazePowderSlot != -1) {
+                info("Adding blaze powder as fuel (shift-click to stack)");
+                mc.interactionManager.clickSlot(handler.syncId, blazePowderSlot, 0, SlotActionType.QUICK_MOVE, mc.player);
             }
 
             bottleAdditionStep++;
