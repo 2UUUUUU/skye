@@ -30,6 +30,7 @@ import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.block.Blocks;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
+import net.minecraft.world.RaycastContext;
 
 import java.util.*;
 
@@ -163,6 +164,11 @@ public class AutoBrewer extends Module {
     private final Setting<OutputMethod> output = sgPotion.add(new EnumSetting.Builder<OutputMethod>()
         .name("output").description("What to do with finished potions").defaultValue(OutputMethod.STORE_IN_CHEST).build());
 
+    private final Setting<Integer> outputChestRange = sgPotion.add(new IntSetting.Builder()
+        .name("output-chest-range").description("Range to search for output chest")
+        .defaultValue(4).min(1).max(4).sliderMax(4)
+        .visible(() -> output.get() == OutputMethod.STORE_IN_CHEST).build());
+
     // Settings - Resources
     private final Setting<ResourceMethod> getResources = sgResources.add(new EnumSetting.Builder<ResourceMethod>()
         .name("get-resources").description("How to obtain brewing resources")
@@ -214,7 +220,9 @@ public class AutoBrewer extends Module {
         TAKE_RESOURCES_FROM_CHEST, CLOSE_RESOURCE_CHEST, FIND_BREWING_STANDS, CHECK_RESOURCES,
         FIND_WATER_SOURCE, MOVE_TO_WATER, FILL_WATER_BOTTLES, SELECT_NEXT_BREWING_STAND,
         OPEN_BREWING_STAND, WAIT_FOR_BREWING_STAND_GUI, ADD_WATER_BOTTLES, ADD_BREWING_INGREDIENT,
-        CLOSE_BREWING_STAND, WAIT_FOR_BREWING, CHECK_BREWING_COMPLETION, COLLECT_POTIONS, LOOP_DELAY
+        CLOSE_BREWING_STAND, WAIT_FOR_BREWING, CHECK_BREWING_COMPLETION, COLLECT_POTIONS,
+        FIND_OUTPUT_CHEST, OPEN_OUTPUT_CHEST, WAIT_FOR_OUTPUT_CHEST_GUI, DEPOSIT_POTIONS,
+        CLOSE_OUTPUT_CHEST, LOOP_DELAY
     }
 
     private State currentState = State.IDLE;
@@ -225,7 +233,9 @@ public class AutoBrewer extends Module {
     private BlockPos selectedChestPos = null;
     private boolean waitingForChestSelection = false;
     private BlockPos waterSourcePos = null;
-    private int bottleAdditionStep = 0; // Track which bottle/fuel we're adding
+    private int bottleAdditionStep = 0;
+    private BlockPos outputChestPos = null;
+    private int potionsBeforeCollection = 0;
 
     private static class BrewingStandInfo {
         BlockPos pos;
@@ -262,16 +272,15 @@ public class AutoBrewer extends Module {
     }
 
     private Color getPotionColor(PotionEffect effect) {
-        // Special colors for specific potions
         return switch (potionToBrew) {
-            case REGENERATION -> new Color(255, 192, 203); // Pink
-            case STRENGTH -> new Color(255, 0, 0); // Bright Red
-            case SWIFTNESS -> new Color(173, 216, 230); // Light Blue
-            case FIRE_RESISTANCE -> new Color(255, 165, 0); // Orange
+            case REGENERATION -> new Color(255, 192, 203);
+            case STRENGTH -> new Color(255, 0, 0);
+            case SWIFTNESS -> new Color(173, 216, 230);
+            case FIRE_RESISTANCE -> new Color(255, 165, 0);
             default -> switch (effect) {
-                case HARMFUL -> new Color(139, 0, 0); // Dark Red
-                case BENEFICIAL -> new Color(0, 200, 0); // Green
-                case NEUTRAL -> new Color(128, 0, 128); // Purple
+                case HARMFUL -> new Color(139, 0, 0);
+                case BENEFICIAL -> new Color(0, 200, 0);
+                case NEUTRAL -> new Color(128, 0, 128);
             };
         };
     }
@@ -351,6 +360,8 @@ public class AutoBrewer extends Module {
         waitingForChestSelection = false;
         waterSourcePos = null;
         bottleAdditionStep = 0;
+        outputChestPos = null;
+        potionsBeforeCollection = 0;
         info("AutoBrewer activated - " + potionToBrew + " (" + recipe.get() + ")");
         if (getResources.get() == ResourceMethod.NEARBY_CHEST) {
             currentState = State.WAIT_FOR_CHEST_SELECTION;
@@ -367,6 +378,7 @@ public class AutoBrewer extends Module {
         selectedChestPos = null;
         waitingForChestSelection = false;
         waterSourcePos = null;
+        outputChestPos = null;
         if (mc.currentScreen != null && mc.player != null) mc.player.closeHandledScreen();
         info("AutoBrewer deactivated");
     }
@@ -411,8 +423,13 @@ public class AutoBrewer extends Module {
                 }
             }
             case OPEN_RESOURCE_CHEST -> {
+                if (!canReachBlock(selectedChestPos)) {
+                    error("Resource chest at " + selectedChestPos + " is out of reach or blocked!");
+                    toggle();
+                    return;
+                }
                 info("Opening resource chest at " + selectedChestPos);
-                if (openChest(selectedChestPos)) {
+                if (openChestRaytraced(selectedChestPos)) {
                     currentState = State.SCAN_RESOURCE_CHEST;
                     delayCounter = actionDelay.get() * 2;
                 } else {
@@ -436,11 +453,6 @@ public class AutoBrewer extends Module {
                     info("Waiting for chest GUI to open...");
                     delayCounter = 5;
                 }
-            }
-            case TAKE_RESOURCES_FROM_CHEST -> {
-                // This state is now handled in SCAN_RESOURCE_CHEST
-                currentState = State.CLOSE_RESOURCE_CHEST;
-                delayCounter = brewingDelay.get();
             }
             case CLOSE_RESOURCE_CHEST -> {
                 if (mc.currentScreen != null && mc.player != null) {
@@ -499,6 +511,11 @@ public class AutoBrewer extends Module {
                     toggle();
                     return;
                 }
+                if (!canReachBlock(waterSourcePos)) {
+                    error("Water source at " + waterSourcePos + " is out of reach or blocked!");
+                    toggle();
+                    return;
+                }
                 info("Found water source at " + waterSourcePos);
                 currentState = State.MOVE_TO_WATER;
                 delayCounter = actionDelay.get();
@@ -543,14 +560,14 @@ public class AutoBrewer extends Module {
                 int startIndex = currentBrewingStandIndex;
                 do {
                     BrewingStandInfo stand = brewingStands.get(currentBrewingStandIndex);
-                    if (stand.cooldownTicks == 0) {
+                    if (stand.cooldownTicks == 0 && canReachBlock(stand.pos)) {
                         nextStand = stand;
                         break;
                     }
                     currentBrewingStandIndex = (currentBrewingStandIndex + 1) % brewingStands.size();
                 } while (currentBrewingStandIndex != startIndex);
                 if (nextStand == null) {
-                    info("All brewing stands are busy, waiting...");
+                    info("All brewing stands are busy or unreachable, waiting...");
                     delayCounter = 20;
                     return;
                 }
@@ -567,7 +584,7 @@ public class AutoBrewer extends Module {
                 }
                 BrewingStandInfo stand = brewingStands.get(currentBrewingStandIndex);
                 info("Opening brewing stand at " + stand.pos);
-                if (openBrewingStand(stand.pos)) {
+                if (openBrewingStandRaytraced(stand.pos)) {
                     currentState = State.WAIT_FOR_BREWING_STAND_GUI;
                     delayCounter = actionDelay.get() * 2;
                 } else {
@@ -580,7 +597,7 @@ public class AutoBrewer extends Module {
                     info("Brewing stand GUI opened");
                     BrewingStandInfo stand = brewingStands.get(currentBrewingStandIndex);
                     if (stand.currentPhase == 0) {
-                        bottleAdditionStep = 0; // Reset for water bottle addition
+                        bottleAdditionStep = 0;
                         currentState = State.ADD_WATER_BOTTLES;
                     } else {
                         currentState = State.ADD_BREWING_INGREDIENT;
@@ -592,10 +609,8 @@ public class AutoBrewer extends Module {
             }
             case ADD_WATER_BOTTLES -> {
                 if (addWaterBottlesToBrewingStandOneByOne()) {
-                    // Still adding bottles/fuel
                     delayCounter = brewingDelay.get();
                 } else {
-                    // All bottles and fuel added
                     info("All water bottles and fuel added");
                     BrewingStandInfo stand = brewingStands.get(currentBrewingStandIndex);
                     stand.currentPhase = 0;
@@ -626,9 +641,6 @@ public class AutoBrewer extends Module {
                     toggle();
                 }
             }
-
-            // Continuation of AutoBrewer.java - Add these methods to complete the class
-
             case CLOSE_BREWING_STAND -> {
                 if (mc.currentScreen != null && mc.player != null) {
                     mc.player.closeHandledScreen();
@@ -640,13 +652,183 @@ public class AutoBrewer extends Module {
                 boolean allComplete = brewingStands.stream().allMatch(s -> s.currentPhase >= phases.length);
 
                 if (allComplete) {
-                    info("All brewing stands have completed all phases!");
-                    currentState = State.LOOP_DELAY;
-                    delayCounter = loopDelay.get();
+                    info("All brewing stands have completed all phases! Waiting for brewing to finish...");
+                    currentState = State.WAIT_FOR_BREWING;
+                    delayCounter = 420; // Wait for brewing (20 seconds)
                 } else {
                     currentState = State.SELECT_NEXT_BREWING_STAND;
                     delayCounter = actionDelay.get();
                 }
+            }
+            case WAIT_FOR_BREWING -> {
+                info("Brewing in progress...");
+                currentState = State.COLLECT_POTIONS;
+                delayCounter = actionDelay.get();
+            }
+            case COLLECT_POTIONS -> {
+                // Count potions before opening brewing stand
+                Item targetItem = recipe.get().getResultItem();
+                potionsBeforeCollection = InvUtils.find(targetItem).count();
+
+                info("Collecting potions from brewing stands (currently have " + potionsBeforeCollection + " potions)");
+
+                // Find first brewing stand that's reachable and has finished brewing
+                BrewingStandInfo standToCollect = null;
+                for (BrewingStandInfo stand : brewingStands) {
+                    if (stand.cooldownTicks == 0 && canReachBlock(stand.pos)) {
+                        standToCollect = stand;
+                        break;
+                    }
+                }
+
+                if (standToCollect == null) {
+                    info("All potions collected or no reachable stands!");
+                    if (output.get() == OutputMethod.STORE_IN_CHEST) {
+                        currentState = State.FIND_OUTPUT_CHEST;
+                        delayCounter = actionDelay.get();
+                    } else {
+                        currentState = State.LOOP_DELAY;
+                        delayCounter = loopDelay.get();
+                    }
+                    return;
+                }
+
+                info("Opening brewing stand to collect potions");
+                if (openBrewingStandRaytraced(standToCollect.pos)) {
+                    currentState = State.CHECK_BREWING_COMPLETION;
+                    delayCounter = actionDelay.get() * 2;
+                } else {
+                    error("Failed to open brewing stand for collection!");
+                    currentState = State.FIND_OUTPUT_CHEST;
+                    delayCounter = actionDelay.get();
+                }
+            }
+            case CHECK_BREWING_COMPLETION -> {
+                if (mc.currentScreen instanceof BrewingStandScreen screen) {
+                    var handler = screen.getScreenHandler();
+
+                    // Check if there are finished potions in slots 0, 1, 2
+                    Item targetItem = recipe.get().getResultItem();
+                    boolean hasFinishedPotions = false;
+
+                    for (int i = 0; i <= 2; i++) {
+                        ItemStack stack = handler.getSlot(i).getStack();
+                        if (!stack.isEmpty() && (stack.getItem() == targetItem || stack.getItem() == Items.SPLASH_POTION || stack.getItem() == Items.POTION)) {
+                            hasFinishedPotions = true;
+                            // Collect the potion
+                            info("Collecting potion from slot " + i);
+                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                            delayCounter = brewingDelay.get();
+                            return;
+                        }
+                    }
+
+                    if (!hasFinishedPotions) {
+                        info("No more potions to collect from this stand");
+                        // Close GUI and mark this stand as collected
+                        mc.player.closeHandledScreen();
+
+                        // Mark the current stand as done
+                        for (BrewingStandInfo stand : brewingStands) {
+                            if (mc.currentScreen == null) {
+                                // We just closed the screen, so check if potions increased
+                                Item checkItem = recipe.get().getResultItem();
+                                int potionsAfter = InvUtils.find(checkItem).count();
+
+                                if (potionsAfter > potionsBeforeCollection) {
+                                    info("Successfully collected " + (potionsAfter - potionsBeforeCollection) + " potions!");
+                                    potionsBeforeCollection = potionsAfter;
+                                }
+
+                                // Go back to collect from next stand
+                                currentState = State.COLLECT_POTIONS;
+                                delayCounter = actionDelay.get();
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    info("Waiting for brewing stand GUI...");
+                    delayCounter = 5;
+                }
+            }
+            case FIND_OUTPUT_CHEST -> {
+                info("Finding output chest...");
+                outputChestPos = findNearestOutputChest();
+                if (outputChestPos == null) {
+                    error("No output chest found within range!");
+                    currentState = State.LOOP_DELAY;
+                    delayCounter = loopDelay.get();
+                    return;
+                }
+                if (!canReachBlock(outputChestPos)) {
+                    error("Output chest at " + outputChestPos + " is out of reach or blocked!");
+                    currentState = State.LOOP_DELAY;
+                    delayCounter = loopDelay.get();
+                    return;
+                }
+                info("Found output chest at " + outputChestPos);
+                currentState = State.OPEN_OUTPUT_CHEST;
+                delayCounter = actionDelay.get();
+            }
+            case OPEN_OUTPUT_CHEST -> {
+                info("Opening output chest");
+                if (openChestRaytraced(outputChestPos)) {
+                    currentState = State.WAIT_FOR_OUTPUT_CHEST_GUI;
+                    delayCounter = actionDelay.get() * 2;
+                } else {
+                    error("Failed to open output chest!");
+                    currentState = State.LOOP_DELAY;
+                    delayCounter = loopDelay.get();
+                }
+            }
+            case WAIT_FOR_OUTPUT_CHEST_GUI -> {
+                if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen) {
+                    info("Output chest GUI opened, depositing potions");
+                    currentState = State.DEPOSIT_POTIONS;
+                    delayCounter = brewingDelay.get();
+                } else {
+                    info("Waiting for output chest GUI...");
+                }
+            }
+            case DEPOSIT_POTIONS -> {
+                if (mc.currentScreen instanceof net.minecraft.client.gui.screen.ingame.GenericContainerScreen screen) {
+                    var handler = screen.getScreenHandler();
+                    Item targetItem = recipe.get().getResultItem();
+
+                    // Find potions in player inventory and transfer them
+                    int containerSlots = handler.getRows() * 9;
+                    boolean foundPotion = false;
+
+                    for (int i = containerSlots; i < handler.slots.size(); i++) {
+                        ItemStack stack = handler.getSlot(i).getStack();
+                        if (!stack.isEmpty() && (stack.getItem() == targetItem || stack.getItem() == Items.SPLASH_POTION || stack.getItem() == Items.POTION)) {
+                            info("Transferring " + stack.getCount() + "x " + Names.get(stack.getItem()) + " to chest");
+                            mc.interactionManager.clickSlot(handler.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                            foundPotion = true;
+                            delayCounter = brewingDelay.get();
+                            return;
+                        }
+                    }
+
+                    if (!foundPotion) {
+                        info("All potions deposited!");
+                        currentState = State.CLOSE_OUTPUT_CHEST;
+                        delayCounter = brewingDelay.get();
+                    }
+                } else {
+                    error("Lost output chest GUI!");
+                    currentState = State.LOOP_DELAY;
+                    delayCounter = loopDelay.get();
+                }
+            }
+            case CLOSE_OUTPUT_CHEST -> {
+                if (mc.currentScreen != null && mc.player != null) {
+                    mc.player.closeHandledScreen();
+                }
+                info("Closed output chest");
+                currentState = State.LOOP_DELAY;
+                delayCounter = loopDelay.get();
             }
             case LOOP_DELAY -> {
                 info("Sequence complete, entering loop delay");
@@ -662,6 +844,34 @@ public class AutoBrewer extends Module {
         }
     }
 
+    // ==================== RAYTRACE & REACH CHECKING ====================
+
+    private boolean canReachBlock(BlockPos pos) {
+        if (mc.player == null || mc.world == null || pos == null) return false;
+
+        // Check distance (max interaction range is 4.5 blocks)
+        double distance = mc.player.getEyePos().squaredDistanceTo(Vec3d.ofCenter(pos));
+        if (distance > 20.25) return false; // 4.5^2 = 20.25
+
+        // Perform raycast to check if block is visible
+        Vec3d eyePos = mc.player.getEyePos();
+        Vec3d targetPos = Vec3d.ofCenter(pos);
+
+        BlockHitResult hitResult = mc.world.raycast(
+            new RaycastContext(
+                eyePos,
+                targetPos,
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE,
+                mc.player
+            )
+        );
+
+        // Check if we hit the target block or nothing (air)
+        return hitResult.getBlockPos().equals(pos) ||
+            mc.world.getBlockState(hitResult.getBlockPos()).isAir();
+    }
+
     private List<BrewingStandInfo> findBrewingStands() {
         List<BrewingStandInfo> stands = new ArrayList<>();
         if (mc.world == null || mc.player == null) return stands;
@@ -672,8 +882,7 @@ public class AutoBrewer extends Module {
                 for (int z = -range; z <= range; z++) {
                     BlockPos pos = playerPos.add(x, y, z);
                     if (mc.world.getBlockEntity(pos) instanceof BrewingStandBlockEntity) {
-                        double dist = mc.player.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
-                        if (dist <= 9) {
+                        if (canReachBlock(pos)) {
                             stands.add(new BrewingStandInfo(pos));
                         }
                     }
@@ -715,36 +924,64 @@ public class AutoBrewer extends Module {
         return true;
     }
 
-    private boolean openBrewingStand(BlockPos pos) {
-        if (mc.player == null || mc.interactionManager == null) return false;
-        Vec3d hitVec = Vec3d.ofCenter(pos);
-        Direction side = Direction.UP;
-        if (smoothAim.get()) {
-            Rotations.rotate(Rotations.getYaw(hitVec), Rotations.getPitch(hitVec), rotationSpeed.get(), () -> {
-                BlockHitResult hitResult = new BlockHitResult(hitVec, side, pos, false);
+    private boolean openBrewingStandRaytraced(BlockPos pos) {
+        if (mc.player == null || mc.interactionManager == null || mc.world == null) return false;
+        if (!canReachBlock(pos)) return false;
+
+        Vec3d eyePos = mc.player.getEyePos();
+        Vec3d targetPos = Vec3d.ofCenter(pos);
+
+        BlockHitResult hitResult = mc.world.raycast(
+            new RaycastContext(
+                eyePos,
+                targetPos,
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE,
+                mc.player
+            )
+        );
+
+        if (hitResult != null && hitResult.getBlockPos().equals(pos)) {
+            if (smoothAim.get()) {
+                Rotations.rotate(Rotations.getYaw(targetPos), Rotations.getPitch(targetPos), rotationSpeed.get(), () -> {
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+                });
+            } else {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
-            });
-        } else {
-            BlockHitResult hitResult = new BlockHitResult(hitVec, side, pos, false);
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+            }
+            return true;
         }
-        return true;
+        return false;
     }
 
-    private boolean openChest(BlockPos pos) {
-        if (mc.player == null || mc.interactionManager == null) return false;
-        Vec3d hitVec = Vec3d.ofCenter(pos);
-        Direction side = Direction.UP;
-        if (smoothAim.get()) {
-            Rotations.rotate(Rotations.getYaw(hitVec), Rotations.getPitch(hitVec), rotationSpeed.get(), () -> {
-                BlockHitResult hitResult = new BlockHitResult(hitVec, side, pos, false);
+    private boolean openChestRaytraced(BlockPos pos) {
+        if (mc.player == null || mc.interactionManager == null || mc.world == null) return false;
+        if (!canReachBlock(pos)) return false;
+
+        Vec3d eyePos = mc.player.getEyePos();
+        Vec3d targetPos = Vec3d.ofCenter(pos);
+
+        BlockHitResult hitResult = mc.world.raycast(
+            new RaycastContext(
+                eyePos,
+                targetPos,
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.NONE,
+                mc.player
+            )
+        );
+
+        if (hitResult != null && hitResult.getBlockPos().equals(pos)) {
+            if (smoothAim.get()) {
+                Rotations.rotate(Rotations.getYaw(targetPos), Rotations.getPitch(targetPos), rotationSpeed.get(), () -> {
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+                });
+            } else {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
-            });
-        } else {
-            BlockHitResult hitResult = new BlockHitResult(hitVec, side, pos, false);
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+            }
+            return true;
         }
-        return true;
+        return false;
     }
 
     private boolean scanAndTakeResourcesFromChest() {
@@ -754,21 +991,15 @@ public class AutoBrewer extends Module {
         Item[] phases = getBrewingPhases();
         int standsCount = Math.min(brewingStands.size(), brewingStandsAmount.get());
 
-        // Calculate what we need
         Map<Item, Integer> requiredItems = new HashMap<>();
 
-        // Add brewing phase ingredients
         for (Item ingredient : phases) {
             requiredItems.put(ingredient, requiredItems.getOrDefault(ingredient, 0) + standsCount);
         }
 
-        // Add water bottles (3 per stand)
         requiredItems.put(Items.POTION, standsCount * 3);
-
-        // Add blaze powder for fuel
         requiredItems.put(Items.BLAZE_POWDER, standsCount);
 
-        // Scan chest for items and take them
         int containerSlots = handler.getRows() * 9;
         boolean foundAll = true;
 
@@ -782,14 +1013,12 @@ public class AutoBrewer extends Module {
             int needed = entry.getValue();
             int found = 0;
 
-            // Search chest slots for this item
             for (int slot = 0; slot < containerSlots; slot++) {
                 ItemStack stack = handler.getSlot(slot).getStack();
                 if (stack.getItem() == item) {
                     int toTake = Math.min(needed - found, stack.getCount());
 
                     if (toTake > 0) {
-                        // Shift-click to take items
                         mc.interactionManager.clickSlot(handler.syncId, slot, 0, SlotActionType.QUICK_MOVE, mc.player);
                         found += toTake;
                         info("Taking " + toTake + "x " + Names.get(item) + " from chest");
@@ -812,7 +1041,6 @@ public class AutoBrewer extends Module {
         if (!(mc.currentScreen instanceof BrewingStandScreen screen)) return false;
         var handler = screen.getScreenHandler();
 
-        // Step 0-2: Add water bottles to slots 0, 1, 2
         if (bottleAdditionStep <= 2) {
             int slot = bottleAdditionStep;
             ItemStack currentStack = handler.getSlot(slot).getStack();
@@ -824,35 +1052,24 @@ public class AutoBrewer extends Module {
                     return false;
                 }
 
-                // Pick up the whole stack with left-click
                 mc.interactionManager.clickSlot(handler.syncId, waterBottleSlot, 0, SlotActionType.PICKUP, mc.player);
-
-                // Place ONE bottle by right-clicking on the brewing stand slot
                 mc.interactionManager.clickSlot(handler.syncId, slot, 1, SlotActionType.PICKUP, mc.player);
-
-                // Return the rest to the original slot
                 mc.interactionManager.clickSlot(handler.syncId, waterBottleSlot, 0, SlotActionType.PICKUP, mc.player);
 
                 info("Added water bottle to slot " + slot);
             }
 
             bottleAdditionStep++;
-            return true; // Continue adding
+            return true;
         }
 
-        // Step 3: Add blaze powder as fuel (slot 4)
         if (bottleAdditionStep == 3) {
             ItemStack fuelStack = handler.getSlot(4).getStack();
             if (fuelStack.isEmpty() || fuelStack.getItem() != Items.BLAZE_POWDER) {
                 int blazePowderSlot = findItemInInventory(Items.BLAZE_POWDER);
                 if (blazePowderSlot != -1) {
-                    // Pick up the whole stack
                     mc.interactionManager.clickSlot(handler.syncId, blazePowderSlot, 0, SlotActionType.PICKUP, mc.player);
-
-                    // Place ONE by right-clicking
                     mc.interactionManager.clickSlot(handler.syncId, 4, 1, SlotActionType.PICKUP, mc.player);
-
-                    // Return the rest
                     mc.interactionManager.clickSlot(handler.syncId, blazePowderSlot, 0, SlotActionType.PICKUP, mc.player);
 
                     info("Added blaze powder as fuel");
@@ -860,25 +1077,21 @@ public class AutoBrewer extends Module {
             }
 
             bottleAdditionStep++;
-            return false; // Done adding
+            return false;
         }
 
-        return false; // All done
+        return false;
     }
 
     private boolean addIngredientToBrewingStand(Item ingredient) {
         if (!(mc.currentScreen instanceof BrewingStandScreen screen)) return false;
         var handler = screen.getScreenHandler();
 
-        // Slot 3 is the ingredient slot
         ItemStack currentIngredient = handler.getSlot(3).getStack();
 
-        // If there's already an ingredient in slot 3, remove it first
         if (!currentIngredient.isEmpty()) {
             info("Removing old ingredient from slot 3: " + Names.get(currentIngredient.getItem()));
-            // Pick up the old ingredient
             mc.interactionManager.clickSlot(handler.syncId, 3, 0, SlotActionType.PICKUP, mc.player);
-            // Find empty slot in inventory to place it
             for (int i = 5; i < handler.slots.size(); i++) {
                 ItemStack invStack = handler.getSlot(i).getStack();
                 if (invStack.isEmpty() || (invStack.getItem() == currentIngredient.getItem() && invStack.getCount() < invStack.getMaxCount())) {
@@ -886,23 +1099,17 @@ public class AutoBrewer extends Module {
                     break;
                 }
             }
-            return true; // Wait for next tick to add new ingredient
+            return true;
         }
 
-        // Now add the new ingredient
         int ingredientSlot = findItemInInventory(ingredient);
         if (ingredientSlot == -1) {
             error("Ingredient " + Names.get(ingredient) + " not found in inventory!");
             return false;
         }
 
-        // Pick up the whole stack with left-click
         mc.interactionManager.clickSlot(handler.syncId, ingredientSlot, 0, SlotActionType.PICKUP, mc.player);
-
-        // Place ONE item by right-clicking on the ingredient slot
         mc.interactionManager.clickSlot(handler.syncId, 3, 1, SlotActionType.PICKUP, mc.player);
-
-        // Return the rest of the stack to the original slot
         mc.interactionManager.clickSlot(handler.syncId, ingredientSlot, 0, SlotActionType.PICKUP, mc.player);
 
         info("Added ONE " + Names.get(ingredient) + " to brewing stand");
@@ -934,7 +1141,31 @@ public class AutoBrewer extends Module {
                 for (int z = -range; z <= range; z++) {
                     BlockPos pos = playerPos.add(x, y, z);
                     var blockState = mc.world.getBlockState(pos);
-                    if (blockState.getBlock() == Blocks.WATER || blockState.getBlock() == Blocks.WATER_CAULDRON) {
+                    if ((blockState.getBlock() == Blocks.WATER || blockState.getBlock() == Blocks.WATER_CAULDRON)
+                        && canReachBlock(pos)) {
+                        double dist = mc.player.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearest = pos;
+                        }
+                    }
+                }
+            }
+        }
+        return nearest;
+    }
+
+    private BlockPos findNearestOutputChest() {
+        if (mc.world == null || mc.player == null) return null;
+        BlockPos playerPos = mc.player.getBlockPos();
+        int range = output.get() == OutputMethod.STORE_IN_CHEST ? outputChestRange.get() : 4;
+        BlockPos nearest = null;
+        double nearestDist = Double.MAX_VALUE;
+        for (int x = -range; x <= range; x++) {
+            for (int y = -range; y <= range; y++) {
+                for (int z = -range; z <= range; z++) {
+                    BlockPos pos = playerPos.add(x, y, z);
+                    if (mc.world.getBlockState(pos).getBlock() == Blocks.CHEST && canReachBlock(pos)) {
                         double dist = mc.player.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
                         if (dist < nearestDist) {
                             nearestDist = dist;
@@ -948,7 +1179,12 @@ public class AutoBrewer extends Module {
     }
 
     private boolean fillBottleWithWater(BlockPos waterPos) {
-        if (mc.player == null || mc.interactionManager == null) return false;
+        if (mc.player == null || mc.interactionManager == null || mc.world == null) return false;
+        if (!canReachBlock(waterPos)) {
+            error("Water source is out of reach!");
+            return false;
+        }
+
         int waterBottles = InvUtils.find(Items.POTION).count();
         int standsCount = Math.min(brewingStands.size(), brewingStandsAmount.get());
         int requiredBottles = standsCount * 3;
@@ -976,20 +1212,34 @@ public class AutoBrewer extends Module {
             return true;
         }
         InvUtils.swap(bottleSlot, false);
-        Vec3d hitVec = Vec3d.ofCenter(waterPos);
-        Direction side = Direction.UP;
-        if (smoothAim.get()) {
-            Rotations.rotate(Rotations.getYaw(hitVec), Rotations.getPitch(hitVec), rotationSpeed.get(), () -> {
-                BlockHitResult hitResult = new BlockHitResult(hitVec, side, waterPos, false);
+
+        Vec3d eyePos = mc.player.getEyePos();
+        Vec3d targetPos = Vec3d.ofCenter(waterPos);
+
+        BlockHitResult hitResult = mc.world.raycast(
+            new RaycastContext(
+                eyePos,
+                targetPos,
+                RaycastContext.ShapeType.OUTLINE,
+                RaycastContext.FluidHandling.ANY,
+                mc.player
+            )
+        );
+
+        if (hitResult != null && hitResult.getBlockPos().equals(waterPos)) {
+            if (smoothAim.get()) {
+                Rotations.rotate(Rotations.getYaw(targetPos), Rotations.getPitch(targetPos), rotationSpeed.get(), () -> {
+                    mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+                    mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                });
+            } else {
                 mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
                 mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
-            });
-        } else {
-            BlockHitResult hitResult = new BlockHitResult(hitVec, side, waterPos, false);
-            mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
-            mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+            }
+            return true;
         }
-        return true;
+
+        return false;
     }
 
     private void info(String s) {
