@@ -3,6 +3,7 @@ package com.example.addon;
 import com.example.addon.commands.*;
 import com.example.addon.hud.*;
 import com.example.addon.modules.*;
+import com.example.addon.modules.AutoBrewer;
 import com.mojang.logging.LogUtils;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -38,6 +39,7 @@ public class Main extends MeteorAddon {
 
         // Modules
         Modules.get().add(new AutoCrafting());
+        Modules.get().add(new AutoBrewer());
         Modules.get().add(new SpawnerProtect());
         Modules.get().add(new AutoSpawnerSell());
         Modules.get().add(new SpawnerDropper());
